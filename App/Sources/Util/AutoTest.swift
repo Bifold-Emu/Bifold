@@ -1,6 +1,7 @@
 #if DEBUG
 import AzaharCore
 import Foundation
+import UIKit
 
 /// Debug-only unattended test hooks, driven by launch arguments:
 ///   -autoboot <file name in Games>   boot that game as soon as the library has scanned it
@@ -257,13 +258,26 @@ enum RemotePlay {
                 DispatchQueue.main.sync { EmulatorCore.shared.setPaused(paused) }
             case "shot":
                 let name = p.count > 1 ? p[1] : "shot"
-                let ok = az_screenshot(dir.appendingPathComponent("\(name).png").path)
+                let url = dir.appendingPathComponent("\(name).png")
+                // Never leave an older capture under this name: a failed shot must not look fresh.
+                try? FileManager.default.removeItem(at: url)
+                let ok = az_screenshot(url.path)
                 log("shot \(name) \(ok ? "ok" : "failed")")
             case "status":
                 var st = AZPerfStats()
                 _ = az_get_perf_stats(&st)
-                log(String(format: "status running=%d speed=%.0f%% fps=%.1f jit=%d", az_is_running() ? 1 : 0,
-                           st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)))
+                var ui = ""
+                DispatchQueue.main.sync {
+                    let app = UIApplication.shared
+                    let states = ["active", "inactive", "background"]
+                    ui = "app=\(states[min(app.applicationState.rawValue, 2)])"
+                    var vc = app.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow?.rootViewController }.first
+                    var chain: [String] = []
+                    while let c = vc { chain.append(String(describing: type(of: c)).prefix(40).description); vc = c.presentedViewController }
+                    ui += " ui=" + chain.joined(separator: ">")
+                }
+                log(String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
+                           az_is_paused() ? 1 : 0, st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)) + ui)
             case "mem": log("mem \(memDetail())")
             case "heap":
                 // Big live malloc blocks by size: what is left behind after save/load.

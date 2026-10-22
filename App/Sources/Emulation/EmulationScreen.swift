@@ -82,6 +82,9 @@ struct EmulationScreen: View {
             core.stop()
         }
         .onChange(of: scenePhase) { phase in
+            #if DEBUG
+            if RemotePlay.enabled { RemotePlay.log("scenePhase \(phase) state=\(core.state) menu=\(showMenu)") }
+            #endif
             if phase != .active {
                 // iOS forbids GPU work in the background: always pause before leaving the foreground.
                 if core.state == .running { pausedByInterruption = true }
@@ -93,6 +96,13 @@ struct EmulationScreen: View {
         }
         .onChange(of: core.state) { state in
             if case .idle = state, startedSession { dismiss() }
+            // The pause menu means "paused": if something else resumed the game, close it.
+            if case .running = state, showMenu { showMenu = false }
+        }
+        .onChange(of: showMenu) { shown in
+            #if DEBUG
+            if RemotePlay.enabled { RemotePlay.log("pause menu \(shown ? "shown" : "dismissed")") }
+            #endif
         }
         .confirmationDialog(game.title, isPresented: $showMenu, titleVisibility: .visible) {
             Button("继续") { core.setPaused(false) }

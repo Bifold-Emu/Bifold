@@ -133,7 +133,10 @@ final class EmulatorCore: ObservableObject {
         currentGame = nil
     }
 
-    func setPaused(_ paused: Bool) {
+    func setPaused(_ paused: Bool, file: String = #fileID, line: Int = #line) {
+        #if DEBUG
+        if RemotePlay.enabled { RemotePlay.log("setPaused(\(paused)) from \(file):\(line) state=\(state)") }
+        #endif
         guard emuThread != nil else { return }
         az_pause(paused)
         state = paused ? .paused : .running
