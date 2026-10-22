@@ -86,6 +86,8 @@ enum AutoTest {
 ///   touch x y [ms]        tap the bottom screen at 3DS coordinates (0…319, 0…239)
 ///   drag x1 y1 x2 y2 ms   swipe on the bottom screen
 ///   stick x y ms          circle pad (-1…1), then centre
+///   combo A+B+X ms        hold several buttons together
+///   clean                 delete the screenshots in Documents/remote
 ///   wait ms
 ///   shot name             screenshot to Documents/remote/name.png
 ///   save N / load N       save state slot N (1…10) / load it
@@ -208,6 +210,53 @@ enum RemotePlay {
             case "press", "hold":
                 guard p.count > 1, let b = buttons[p[1].uppercased()] else { log("bad button \(raw)"); continue }
                 az_button(b, true); ms(n(2, 120)); az_button(b, false); ms(80)
+            case "combo":
+                // combo UP+B+X ms: hold several buttons together (e.g. a game's delete-save combo)
+                let names = p.count > 1 ? p[1].uppercased().split(separator: "+").map(String.init) : []
+                let bs = names.compactMap { buttons[$0] }
+                guard !bs.isEmpty, bs.count == names.count else { log("bad combo \(raw)"); continue }
+                bs.forEach { az_button($0, true) }; ms(n(2, 1500)); bs.forEach { az_button($0, false) }; ms(80)
+            case "mp":
+                // mp host NAME [public] | lan | joinlan | join ADDR [PORT] | chat TEXT | info | leave
+                //    | nick NAME | lobby URL
+                let sub = p.count > 1 ? p[1] : "info"
+                let rest = p.count > 2 ? p[2...].joined(separator: " ") : ""
+                DispatchQueue.main.sync {
+                    let mp = MultiplayerManager.shared
+                    switch sub {
+                    case "host":
+                        mp.host(name: rest.replacingOccurrences(of: " public", with: ""), port: az_mp_default_port(),
+                                password: "", maxPlayers: 4, isPublic: rest.hasSuffix(" public"),
+                                preferredGame: EmulatorCore.shared.currentGame)
+                    case "lan": mp.lan.startBrowsing()
+                    case "joinlan":
+                        if let r = mp.lan.rooms.first { mp.join(address: r.addresses.first ?? "", port: r.port, password: "") }
+                        else { log("mp no lan room") }
+                    case "join":
+                        let a = rest.split(separator: " ")
+                        mp.join(address: a.first.map(String.init) ?? "", port: a.count > 1 ? UInt16(a[1]) ?? az_mp_default_port() : az_mp_default_port(), password: "")
+                    case "chat": mp.send(rest)
+                    case "leave": mp.leave()
+                    case "nick": AppSettings.shared.nickname = rest
+                    case "lobby": AppSettings.shared.lobbyURL = rest; EmulatorCore.shared.reloadSettings(); mp.refreshLobby()
+                    default: break
+                    }
+                }
+                ms(sub == "info" ? 0 : 300)
+                DispatchQueue.main.sync {
+                    let mp = MultiplayerManager.shared
+                    log("mp state=\(mp.state.rawValue) hosting=\(mp.isHosting) busy=\(mp.isBusy) room=\(mp.roomName) err=\(mp.lastError ?? "-") lobbyErr=\(mp.lobbyError ?? "-")")
+                    log("mp members=" + mp.members.map { "\($0.nickname)[\($0.game)]" }.joined(separator: ","))
+                    log("mp lan=" + mp.lan.rooms.map { "\($0.name)@\($0.addresses.joined(separator: "/")):\($0.port) \($0.players)/\($0.maxPlayers)" }.joined(separator: "; "))
+                    log("mp lobby=" + mp.lobbyRooms.map { "\($0.name)@\($0.address):\($0.port)" }.joined(separator: "; "))
+                    for c in mp.chat.suffix(4) { log("mp chat \(c.nickname): \(c.text)") }
+                }
+            case "clean":
+                // delete old screenshots in Documents/remote
+                let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+                let pngs = files.filter { $0.pathExtension == "png" }
+                pngs.forEach { try? FileManager.default.removeItem(at: $0) }
+                log("clean removed \(pngs.count)")
             case "touch":
                 guard let (x, y) = touchPoint(f(1), f(2)) else { log("no bottom screen"); continue }
                 _ = az_touch_begin(x, y); ms(n(3, 150)); az_touch_end(); ms(80)

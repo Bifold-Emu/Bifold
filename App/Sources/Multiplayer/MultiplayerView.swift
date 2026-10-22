@@ -4,6 +4,8 @@ import SwiftUI
 /// Lobby / LAN / direct connect / host, and the room screen once connected.
 struct MultiplayerView: View {
     var inGame: Game? = nil
+    /// Shown as a tab of the app (no "完成" button, large title).
+    var isTab = false
     @ObservedObject private var mp = MultiplayerManager.shared
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var lan = MultiplayerManager.shared.lan
@@ -34,10 +36,13 @@ struct MultiplayerView: View {
             }
         }
         .navigationTitle(mp.isConnected ? (mp.roomName.isEmpty ? "房间" : mp.roomName) : "联机")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(isTab ? .large : .inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                if !isTab { Button("完成") { dismiss() } }
+            }
         }
+        .tint(Theme.accent)
         .alert("联机", isPresented: Binding(get: { mp.lastError != nil }, set: { if !$0 { mp.lastError = nil } })) {
             Button("好", role: .cancel) {}
         } message: { Text(mp.lastError ?? "") }
@@ -57,7 +62,7 @@ struct MultiplayerView: View {
     }
 
     private var browser: some View {
-        Form {
+        ThemedForm {
             Section {
                 Picker("方式", selection: $tab) {
                     ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
@@ -79,8 +84,9 @@ struct MultiplayerView: View {
             case .host: hostSection
             }
         }
+        .themedList()
         .disabled(mp.isBusy)
-        .overlay { if mp.isBusy { ProgressView("连接中…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
+        .overlay { if mp.isBusy { ProgressView("正在连接").padding(20).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16)) } }
     }
 
     // MARK: Sections
@@ -198,7 +204,7 @@ struct RoomView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List {
+            List { Group {
                 Section("成员 \(mp.members.count)") {
                     ForEach(mp.members) { m in
                         HStack {
@@ -229,14 +235,15 @@ struct RoomView: View {
                 Section {
                     Button(mp.isHosting ? "关闭房间" : "离开房间", role: .destructive) { mp.leave() }
                 }
-            }
+            }.listRowBackground(Theme.surface) }
+            .themedList()
             HStack {
                 TextField("发送消息", text: $message).textFieldStyle(.roundedBorder)
                     .onSubmit(send)
                 Button("发送", action: send).disabled(message.isEmpty)
             }
             .padding()
-            .background(.bar)
+            .background(Theme.surface)
         }
     }
 

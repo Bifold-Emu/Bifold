@@ -33,10 +33,14 @@ esac
 [ -d "$SRC/src/azios" ] || "$ROOT/scripts/bootstrap.sh"
 
 BUILD="$ROOT/build/ios$SUFFIX-$FLAVOR"
+# Azahar's built-in AES key blob is never compiled in: Bifold ships no Nintendo keys. Players who
+# need them (encrypted content, some wireless features, amiibo) import aes_keys.txt from their
+# own console; see the in-app help (设置 › 主机与系统文件 › 密钥).
+KEYBLOB=OFF
 if [ "$FLAVOR" = "appstore" ]; then
-  KEYBLOB=OFF; APPSTORE=ON
+  APPSTORE=ON
 else
-  KEYBLOB=ON; APPSTORE=OFF
+  APPSTORE=OFF
 fi
 
 echo "==> Configuring ($FLAVOR, $SDK)"

@@ -14,8 +14,7 @@ struct AzaharApp: App {
 
     var body: some Scene {
         WindowGroup {
-            LibraryView()
-                .preferredColorScheme(.dark)
+            RootView()
                 .onOpenURL { url in
                     // "Open in…" from Files/AirDrop: import the game file. Files inside our own
                     // folder (opened in place from the Files app) are picked up by the folder scan.

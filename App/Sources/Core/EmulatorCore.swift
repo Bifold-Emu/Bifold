@@ -90,6 +90,7 @@ final class EmulatorCore: ObservableObject {
         reloadSettings()
         currentGame = game
         state = .loading(stage: 0, progress: 0)
+        PlayHistory.shared.sessionStarted(game)
 
         let path = game.url.path
         let thread = Thread { [weak self] in
@@ -121,6 +122,7 @@ final class EmulatorCore: ObservableObject {
 
     private func sessionEnded(result: AZResult, details: String) {
         emuThread = nil
+        PlayHistory.shared.sessionEnded()
         perfTimer?.invalidate()
         perfTimer = nil
         isFastForward = false
@@ -156,6 +158,13 @@ final class EmulatorCore: ObservableObject {
         defer { az_free(p) }
         let data = Data(String(cString: p).utf8)
         return (try? JSONDecoder().decode([SaveStateInfo].self, from: data)) ?? []
+    }
+
+    /// Screenshot of both screens to `url` (needs the game running: the renderer takes it on its
+    /// next presented frame). Waits off the main thread, up to ~2 s.
+    func capture(to url: URL) async -> Bool {
+        let path = url.path
+        return await Task.detached { az_screenshot(path) }.value
     }
 
     /// Waits for the renderer off the main thread (up to ~2 s).

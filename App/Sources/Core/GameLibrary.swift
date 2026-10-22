@@ -204,17 +204,27 @@ final class GameLibrary: ObservableObject {
         notice = nil
     }
 
-    /// A file that was modified in the last few seconds may still be arriving (Finder / iTunes
-    /// copies write it progressively), so it is left for the next scan.
+    /// A file that changed in the last few seconds may still be arriving (Finder / iTunes /
+    /// devicectl copies write it progressively), so it is left for the next scan.
+    /// The status-change time (ctime) is used, not the modification date: copy tools set the
+    /// modification date to the source file's, and some create the file at its final size first,
+    /// so neither the date nor the size shows a copy in progress. ctime cannot be set from outside
+    /// and moves on every write.
     nonisolated static func isStillArriving(_ url: URL) -> Bool {
-        let fm = FileManager.default
-        guard let a = try? fm.attributesOfItem(atPath: url.path),
-              let date = a[.modificationDate] as? Date else { return true }
-        if Date().timeIntervalSince(date) < 3 { return true }
-        let size = (a[.size] as? NSNumber)?.int64Value ?? -1
-        Thread.sleep(forTimeInterval: 0.3)
-        let again = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? -2
-        return size != again
+        guard let first = fileState(url) else { return true }
+        if Date().timeIntervalSince1970 - first.ctime < 5 { return true }
+        Thread.sleep(forTimeInterval: 1)
+        guard let again = fileState(url) else { return true }
+        return again != first
+    }
+
+    struct FileState: Equatable { let size: Int64; let ctime: Double }
+
+    nonisolated static func fileState(_ url: URL) -> FileState? {
+        var st = stat()
+        guard stat(url.path, &st) == 0 else { return nil }
+        let ctime = Double(st.st_ctimespec.tv_sec) + Double(st.st_ctimespec.tv_nsec) / 1e9
+        return FileState(size: Int64(st.st_size), ctime: ctime)
     }
 
     /// Moves `url` into `dir`, adding " (2)", " (3)"… instead of overwriting.
@@ -272,7 +282,15 @@ final class GameLibrary: ObservableObject {
                 GameLibrary.shared.installingName = name
                 GameLibrary.shared.installProgress = 0
             }
+            let before = fileState(url)
             let code = await installCIAFile(url.path)
+            if let after = fileState(url), let before,
+               after != before || Date().timeIntervalSince1970 - after.ctime < 5 {
+                // Written to while we read it: an unfinished copy, not a bad file (and a "success"
+                // would have installed half a file). Install it again once the copy is done.
+                report.pending = true
+                continue
+            }
             if code == 0 {
                 if deleteAfterInstall {
                     try? fm.removeItem(at: url)

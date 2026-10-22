@@ -596,6 +596,27 @@ index 0ea2563..50acd19 100644
  } // namespace Kernel
  
  BOOST_CLASS_EXPORT_KEY(Kernel::AddressMapping)
+diff --git a/src/core/hle/kernel/shared_page.cpp b/src/core/hle/kernel/shared_page.cpp
+index ef7f169..648de48 100644
+--- a/src/core/hle/kernel/shared_page.cpp
++++ b/src/core/hle/kernel/shared_page.cpp
+@@ -178,6 +178,16 @@ template <class Archive>
+ void Handler::serialize(Archive& ar, const unsigned int) {
+     ar& boost::serialization::base_object<BackingMem>(*this);
+     ar& boost::serialization::make_binary_object(&shared_page, sizeof(shared_page));
++    if constexpr (Archive::is_loading::value) {
++        // load_construct_data set init_time to "now", but the core timing restored before the
++        // kernel still holds the state's uptime, so the console clock would read now + uptime
++        // (hours ahead after a long session: wrong day/night in games with a real-time clock).
++        // Keep the clock on the host time instead.
++        if (Settings::values.init_clock.GetValue() == Settings::InitClock::SystemTime &&
++            Core::System::GetInstance().Movie().GetOverrideInitTime() == 0) {
++            init_time -= std::chrono::duration_cast<std::chrono::seconds>(timing.GetGlobalTimeUs());
++        }
++    }
+ }
+ SERIALIZE_IMPL(Handler)
+ 
 diff --git a/src/core/savestate.cpp b/src/core/savestate.cpp
 index 16c3db6..00c60d1 100644
 --- a/src/core/savestate.cpp

@@ -26,6 +26,12 @@ final class EmulatorSurfaceUIView: UIView {
             l.isHidden = true
             layer.addSublayer(l)
         }
+        for k in knuckles {
+            k.isHidden = true
+            k.startPoint = CGPoint(x: 0.5, y: 0); k.endPoint = CGPoint(x: 0.5, y: 1)
+            k.colors = [UIColor(hex: 0x9AA6B8).cgColor, UIColor(hex: 0x4F5A6B).cgColor]
+            layer.addSublayer(k)
+        }
         let link = CADisplayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick))
         link.add(to: .main, forMode: .common)
         displayLink = link
@@ -58,6 +64,7 @@ final class EmulatorSurfaceUIView: UIView {
                   t.x, t.y, t.width, t.height, t.enabled ? 1 : 0, n, w, h, topLayer.isHidden ? 1 : 0)
         }
         #endif
+        updateHinge()
         guard az_is_software_renderer() else {
             if !topLayer.isHidden { topLayer.isHidden = true; bottomLayer.isHidden = true }
             return
@@ -83,6 +90,38 @@ final class EmulatorSurfaceUIView: UIView {
                 l.contents = image
             }
             if i == 1 { lastFrame = counter }
+        }
+        CATransaction.commit()
+    }
+
+    /// The fold: two hinge knuckles in the black margins beside the bottom screen, at the line
+    /// where it meets the top screen (portrait stacked layout). Never drawn over game pixels.
+    private let knuckles = [CAGradientLayer(), CAGradientLayer()]
+    private var lastHinge: (CGRect, CGRect) = (.zero, .zero)
+
+    private func updateHinge() {
+        var t = AZScreenRect(), b = AZScreenRect()
+        guard az_get_screen_rects(&t, &b), t.enabled, b.enabled else {
+            knuckles.forEach { $0.isHidden = true }
+            return
+        }
+        let s = contentScaleFactor
+        let top = CGRect(x: CGFloat(t.x) / s, y: CGFloat(t.y) / s, width: CGFloat(t.width) / s, height: CGFloat(t.height) / s)
+        let bottom = CGRect(x: CGFloat(b.x) / s, y: CGFloat(b.y) / s, width: CGFloat(b.width) / s, height: CGFloat(b.height) / s)
+        guard (top, bottom) != lastHinge else { return }
+        lastHinge = (top, bottom)
+        // Only when the bottom screen sits right under the top one with room on both sides.
+        let margin = bottom.minX - top.minX
+        let stacked = abs(bottom.minY - top.maxY) < 4 && margin > 24 && abs(top.midX - bottom.midX) < 4
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (i, k) in knuckles.enumerated() {
+            k.isHidden = !stacked
+            guard stacked else { continue }
+            let w = min(54, margin * 0.55), h: CGFloat = 9
+            let cx = i == 0 ? top.minX + margin / 2 : top.maxX - margin / 2
+            k.frame = CGRect(x: cx - w / 2, y: bottom.minY + 3, width: w, height: h)
+            k.cornerRadius = h / 2
         }
         CATransaction.commit()
     }

@@ -132,6 +132,9 @@ final class MultiplayerManager: ObservableObject {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         az_mp_send_chat(trimmed)
+        // The room does not echo our own messages back (same as Azahar's desktop chat), so show
+        // them right away, or the sender never sees what they wrote.
+        chat.append(ChatLine(nickname: AppSettings.shared.nickname, text: trimmed, isSystem: false))
     }
 
     func kick(_ m: Member) { az_mp_kick(m.nickname) }

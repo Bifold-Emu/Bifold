@@ -23,11 +23,23 @@ final class VirtualControllerView: UIView {
         init(kind: Kind, label: String) {
             self.kind = kind
             self.label = label
-            shape.lineWidth = 1.5
+            shape.lineWidth = 1
+            // A dark lip under each control so it reads as a physical key.
+            shape.shadowColor = UIColor.black.cgColor
+            shape.shadowOpacity = 0.55
+            shape.shadowRadius = 0
             text.alignmentMode = .center
             text.contentsScale = UIScreen.main.scale
             text.string = label
-            knob.fillColor = UIColor(white: 1, alpha: 0.55).cgColor
+            let rounded = UIFont.systemFont(ofSize: 17, weight: .heavy).fontDescriptor.withDesign(.rounded)
+            text.font = rounded.map { UIFont(descriptor: $0, size: 17) } ?? UIFont.systemFont(ofSize: 17, weight: .heavy)
+            knob.fillColor = UIColor(hex: 0x5B687E).cgColor
+            knob.strokeColor = UIColor(white: 1, alpha: 0.12).cgColor
+            knob.lineWidth = 1
+            knob.shadowColor = UIColor.black.cgColor
+            knob.shadowOpacity = 0.5
+            knob.shadowRadius = 3
+            knob.shadowOffset = CGSize(width: 0, height: 3)
         }
 
         var isRound: Bool {
@@ -46,7 +58,8 @@ final class VirtualControllerView: UIView {
                 shape.path = (isRound ? UIBezierPath(ovalIn: bounds)
                                       : UIBezierPath(roundedRect: bounds, cornerRadius: min(bounds.height / 2, 12))).cgPath
             }
-            let fontSize = max(11, min(frame.height * 0.38, 22))
+            shape.shadowPath = shape.path
+            let fontSize = max(10, min(frame.height * (frame.width > frame.height * 1.6 ? 0.42 : 0.4), 22))
             text.fontSize = fontSize
             text.frame = CGRect(x: frame.minX, y: frame.midY - fontSize * 0.65, width: frame.width, height: fontSize * 1.3)
             if case .dpad = kind { text.isHidden = true }
@@ -62,9 +75,12 @@ final class VirtualControllerView: UIView {
         func refresh() {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            shape.fillColor = UIColor(white: pressed ? 0.85 : 0.15, alpha: pressed ? 0.75 : 0.45).cgColor
-            shape.strokeColor = UIColor(white: 1, alpha: 0.6).cgColor
-            text.foregroundColor = UIColor(white: pressed ? 0.1 : 1, alpha: 0.95).cgColor
+            let isPad: Bool = { if case .circlePad = kind { return true }; return false }()
+            shape.fillColor = (isPad ? UIColor(hex: 0x232C39, alpha: 0.85)
+                                     : UIColor(hex: pressed ? 0x56657E : 0x2A3443, alpha: pressed ? 0.95 : 0.85)).cgColor
+            shape.strokeColor = UIColor(white: 1, alpha: pressed ? 0.25 : 0.1).cgColor
+            shape.shadowOffset = CGSize(width: 0, height: isPad ? 0 : (pressed ? 1 : 3))
+            text.foregroundColor = UIColor(hex: 0xDCE3EE).cgColor
             CATransaction.commit()
         }
 
