@@ -18,6 +18,9 @@ final class VirtualControllerView: UIView {
         let shape = CAShapeLayer()
         let text = CATextLayer()
         let knob = CAShapeLayer() // circle pad thumb
+        let arms = CAShapeLayer() // d-pad: the pressed directions only
+        /// D-pad directions held: 0 right, 1 up, 2 left, 3 down.
+        var dirs = Set<Int>() { didSet { if dirs != oldValue { refresh() } } }
         var pressed = false { didSet { if pressed != oldValue { refresh() } } }
 
         init(kind: Kind, label: String) {
@@ -54,6 +57,7 @@ final class VirtualControllerView: UIView {
             switch kind {
             case .dpad:
                 shape.path = Self.crossPath(in: bounds).cgPath
+                arms.frame = frame
             default:
                 shape.path = (isRound ? UIBezierPath(ovalIn: bounds)
                                       : UIBezierPath(roundedRect: bounds, cornerRadius: min(bounds.height / 2, 12))).cgPath
@@ -78,6 +82,18 @@ final class VirtualControllerView: UIView {
             let isPad: Bool = { if case .circlePad = kind { return true }; return false }()
             // Light slate keys with a white rim stand out against the black around the screens and
             // against dark game scenes; a pressed key turns amber (the app's action colour).
+            let isDpad: Bool = { if case .dpad = kind { return true }; return false }()
+            if isDpad {
+                // The cross stays put; only the arms being pressed light up.
+                shape.fillColor = UIColor(hex: 0x5A6880, alpha: 0.92).cgColor
+                shape.strokeColor = UIColor(white: 1, alpha: 0.32).cgColor
+                shape.lineWidth = 1.5
+                shape.shadowOffset = CGSize(width: 0, height: 3)
+                arms.fillColor = UIColor(hex: 0xFFB24A).cgColor
+                arms.path = Self.armsPath(dirs, in: CGRect(origin: .zero, size: frame.size)).cgPath
+                CATransaction.commit()
+                return
+            }
             if isPad {
                 shape.fillColor = UIColor(hex: pressed ? 0x46536A : 0x3A4657, alpha: 0.9).cgColor
             } else {
@@ -97,6 +113,20 @@ final class VirtualControllerView: UIView {
             knob.position = CGPoint(x: frame.midX + dx, y: frame.midY + dy)
             _ = r
             CATransaction.commit()
+        }
+
+        /// One rounded rectangle per pressed arm of the cross (centre square excluded).
+        static func armsPath(_ dirs: Set<Int>, in r: CGRect) -> UIBezierPath {
+            let t = r.width / 3, inset: CGFloat = 2
+            let p = UIBezierPath()
+            let rects: [Int: CGRect] = [
+                0: CGRect(x: 2 * t, y: t, width: t, height: t),
+                1: CGRect(x: t, y: 0, width: t, height: t),
+                2: CGRect(x: 0, y: t, width: t, height: t),
+                3: CGRect(x: t, y: 2 * t, width: t, height: t),
+            ]
+            for d in dirs.sorted() { if let rc = rects[d] { p.append(UIBezierPath(roundedRect: rc.insetBy(dx: inset, dy: inset), cornerRadius: 4)) } }
+            return p
         }
 
         static func crossPath(in r: CGRect) -> UIBezierPath {
@@ -153,6 +183,7 @@ final class VirtualControllerView: UIView {
             layer.addSublayer(c.shape)
             layer.addSublayer(c.text)
             if case .circlePad = c.kind { layer.addSublayer(c.knob) }
+            if case .dpad = c.kind { layer.addSublayer(c.arms) }
         }
     }
 
@@ -226,6 +257,15 @@ final class VirtualControllerView: UIView {
                                                   width: smallH * 1.4, height: smallH * 1.4))
         }
         controls.forEach { $0.layout() }
+        #if DEBUG
+        // -uiDemo dpad: show "up" and "B" held, to check the pressed look in screenshots.
+        if UserDefaults.standard.string(forKey: "uiDemo") == "dpad" {
+            for c in controls {
+                if case .dpad = c.kind { c.dirs = [1] }
+                if case .button(let b) = c.kind, b == AZ_BUTTON_B { c.pressed = true }
+            }
+        }
+        #endif
     }
 
     private static func same(_ a: Kind, _ b: Kind) -> Bool {
@@ -294,6 +334,7 @@ final class VirtualControllerView: UIView {
         var stick = CGPoint.zero
         var stickActive = false
         for c in controls { c.pressed = false }
+        var dpadDirs = Set<Int>()
 
         for (id, idx) in touchControl {
             guard let p = touchPoint[id] else { continue }
@@ -315,6 +356,8 @@ final class VirtualControllerView: UIView {
                                               [AZ_BUTTON_LEFT, AZ_BUTTON_DOWN], [AZ_BUTTON_DOWN],
                                               [AZ_BUTTON_DOWN, AZ_BUTTON_RIGHT]]
                     dirs[sector].forEach { buttons.insert($0.rawValue) }
+                    dpadDirs.insert(sector / 2)
+                    if sector % 2 == 1 { dpadDirs.insert((sector / 2 + 1) % 4) }
                     c.pressed = true
                 }
             case .circlePad:
@@ -329,6 +372,7 @@ final class VirtualControllerView: UIView {
                 c.moveKnob(dx: dx * radius * 0.6, dy: dy * radius * 0.6)
             }
         }
+        for c in controls { if case .dpad = c.kind { c.dirs = dpadDirs } }
         if !stickActive, let pad = controls.first(where: { if case .circlePad = $0.kind { return true }; return false }) {
             pad.moveKnob(dx: 0, dy: 0)
         }
