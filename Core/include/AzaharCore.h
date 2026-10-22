@@ -174,6 +174,8 @@ char* az_debug_heap(void);
 /// Debug: from now on remember the call stack of every malloc of at least `min_bytes`;
 /// az_debug_heap() then also lists where the still-live ones came from.
 void az_debug_track_big_allocs(size_t min_bytes);
+/// Debug: emulated console clock minus host local time, in ms (INT64_MIN when not running).
+int64_t az_debug_console_clock_offset_ms(void);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the

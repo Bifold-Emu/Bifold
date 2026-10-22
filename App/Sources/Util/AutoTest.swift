@@ -325,7 +325,8 @@ enum RemotePlay {
                     while let c = vc { chain.append(String(describing: type(of: c)).prefix(40).description); vc = c.presentedViewController }
                     ui += " ui=" + chain.joined(separator: ">")
                 }
-                log(String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
+                let clock = az_debug_console_clock_offset_ms()
+                log((clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
                            az_is_paused() ? 1 : 0, st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)) + ui)
             case "mem": log("mem \(memDetail())")
             case "heap":

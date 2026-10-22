@@ -10,6 +10,7 @@
 //
 // User directory: $AZ_TEST_USERDIR (default /tmp/azios-test-user).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -144,7 +145,9 @@ int CmdSaveState(const char* path) {
     std::atomic<int> result{-1};
     std::thread emu([&] { result = static_cast<int>(az_run_game(path)); });
     const auto sleep = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
-    sleep(2000);
+    // Run long enough that a clock which wrongly adds the state's uptime would be visibly off.
+    sleep(8000);
+    const long long offset_before = az_debug_console_clock_offset_ms();
     az_save_state(1);
     bool saved = false;
     for (int i = 0; i < 50 && !saved; ++i) {
@@ -168,6 +171,14 @@ int CmdSaveState(const char* path) {
         std::printf("load %d: running=%d frames %llu -> %llu\n", i + 1, az_is_running(),
                     static_cast<unsigned long long>(f1), static_cast<unsigned long long>(f2));
     }
+    // The console clock must still follow the host clock after a load (it used to run ahead by
+    // the uptime stored in the state).
+    const long long offset_after = az_debug_console_clock_offset_ms();
+    // (Emulated time may drift from the host while running, so compare with the drift before the
+    // save: the bug added the whole uptime of the state, which is longer than both.)
+    const bool clock_ok = std::llabs(offset_after) < std::max(3000LL, std::llabs(offset_before));
+    std::printf("clock offset before save %lld ms, after loads %lld ms (%s)\n", offset_before,
+                offset_after, clock_ok ? "ok" : "WRONG");
     // Host paths inside a state must survive the user directory moving (iOS gives the app a new
     // container path on reinstall/update): an absolute path from elsewhere is rebased on load...
     const std::string user_dir = FileUtil::GetUserPath(FileUtil::UserPath::UserDir);
@@ -198,7 +209,7 @@ int CmdSaveState(const char* path) {
     az_free(heap);
     az_stop();
     emu.join();
-    return saved && loads_ok && one_process && rebase_ok && relative_ok ? 0 : 1;
+    return saved && loads_ok && one_process && rebase_ok && relative_ok && clock_ok ? 0 : 1;
 }
 
 int CmdExit(const char* path) {

@@ -33,8 +33,8 @@ final class VirtualControllerView: UIView {
             text.string = label
             let rounded = UIFont.systemFont(ofSize: 17, weight: .heavy).fontDescriptor.withDesign(.rounded)
             text.font = rounded.map { UIFont(descriptor: $0, size: 17) } ?? UIFont.systemFont(ofSize: 17, weight: .heavy)
-            knob.fillColor = UIColor(hex: 0x5B687E).cgColor
-            knob.strokeColor = UIColor(white: 1, alpha: 0.12).cgColor
+            knob.fillColor = UIColor(hex: 0x9AA6B8).cgColor
+            knob.strokeColor = UIColor(white: 1, alpha: 0.45).cgColor
             knob.lineWidth = 1
             knob.shadowColor = UIColor.black.cgColor
             knob.shadowOpacity = 0.5
@@ -76,11 +76,17 @@ final class VirtualControllerView: UIView {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             let isPad: Bool = { if case .circlePad = kind { return true }; return false }()
-            shape.fillColor = (isPad ? UIColor(hex: 0x232C39, alpha: 0.85)
-                                     : UIColor(hex: pressed ? 0x56657E : 0x2A3443, alpha: pressed ? 0.95 : 0.85)).cgColor
-            shape.strokeColor = UIColor(white: 1, alpha: pressed ? 0.25 : 0.1).cgColor
+            // Light slate keys with a white rim stand out against the black around the screens and
+            // against dark game scenes; a pressed key turns amber (the app's action colour).
+            if isPad {
+                shape.fillColor = UIColor(hex: pressed ? 0x46536A : 0x3A4657, alpha: 0.9).cgColor
+            } else {
+                shape.fillColor = (pressed ? UIColor(hex: 0xFFB24A) : UIColor(hex: 0x5A6880, alpha: 0.92)).cgColor
+            }
+            shape.strokeColor = UIColor(white: 1, alpha: pressed ? 0.6 : 0.32).cgColor
+            shape.lineWidth = 1.5
             shape.shadowOffset = CGSize(width: 0, height: isPad ? 0 : (pressed ? 1 : 3))
-            text.foregroundColor = UIColor(hex: 0xDCE3EE).cgColor
+            text.foregroundColor = (pressed ? UIColor(hex: 0x2B1B00) : UIColor.white).cgColor
             CATransaction.commit()
         }
 

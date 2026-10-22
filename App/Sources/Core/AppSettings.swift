@@ -88,7 +88,7 @@ final class AppSettings: ObservableObject {
     @AppStorage("lleApplets") var lleApplets = false { willSet { objectWillChange.send() } }
 
     // MARK: Controls
-    @AppStorage("controllerOpacity") var controllerOpacity = 0.55 { willSet { objectWillChange.send() } }
+    @AppStorage("controllerOpacity") var controllerOpacity = 0.75 { willSet { objectWillChange.send() } }
     @AppStorage("haptics") var haptics = true { willSet { objectWillChange.send() } }
     @AppStorage("motionControls") var motionControls = true { willSet { objectWillChange.send() } }
     @AppStorage("hideControllerWithGamepad") var hideControllerWithGamepad = true { willSet { objectWillChange.send() } }
@@ -100,6 +100,12 @@ final class AppSettings: ObservableObject {
     @AppStorage("lanDiscovery") var lanDiscovery = true { willSet { objectWillChange.send() } }
 
     private init() {
+        // 0.55 was the old default; with the lighter keys it is too faint. Move it up once.
+        let d = UserDefaults.standard
+        if !d.bool(forKey: "controllerOpacityMigrated") {
+            if d.object(forKey: "controllerOpacity") != nil, abs(controllerOpacity - 0.55) < 0.001 { controllerOpacity = 0.75 }
+            d.set(true, forKey: "controllerOpacityMigrated")
+        }
         if nickname.isEmpty {
             nickname = "iOS-" + String(UUID().uuidString.prefix(4))
         }

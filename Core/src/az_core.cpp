@@ -38,7 +38,9 @@
 #include "core/frontend/framebuffer_layout.h"
 #include "core/file_sys/cia_container.h"
 #include "core/file_sys/title_metadata.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
+#include "core/hle/kernel/shared_page.h"
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/fs/archive.h"
@@ -1223,3 +1225,24 @@ void az_set_console_username(const char* name) {
 }
 
 } // extern "C"
+
+int64_t az_debug_console_clock_offset_ms(void) {
+    auto& system = Core::System::GetInstance();
+    if (!system.IsPoweredOn()) {
+        return INT64_MIN;
+    }
+    const s64 console = static_cast<s64>(system.Kernel().GetSharedPageHandler().GetSystemTimeSince2000());
+    // Host local time since 2000-01-01 00:00 local, computed like SharedPage::GetInitTime does.
+    auto now = std::chrono::system_clock::now();
+    const std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+    if (const std::tm* tm = std::localtime(&now_t); tm && tm->tm_isdst > 0) {
+        now += std::chrono::hours(1);
+    }
+    std::tm epoch{};
+    epoch.tm_mday = 1;
+    epoch.tm_year = 100;
+    const s64 host = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() -
+                     static_cast<s64>(std::mktime(&epoch)) * 1000;
+    return console - host;
+}
+
