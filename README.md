@@ -247,6 +247,6 @@ xcrun lldb --batch -o "device select <设备ID>" -o "device process attach --pid
 
 GPL-2.0-or-later，与 Azahar 相同（见 `LICENSE.txt`）。分发编译好的 App（包括 IPA）时，必须同时提供对应的完整源代码。
 
-- 源码仓库：<https://github.com/WuWaA/Bifold>。仓库里只有本项目的代码和对 Azahar 及其子模块的补丁（`patches/`）；Azahar 源码由 `scripts/bootstrap.sh` 按固定版本下载，然后打上补丁。所以某个版本的 App 对应的源码，就是同一个提交的本仓库加上 bootstrap 里写明的 Azahar 版本。
+- 源码仓库：<https://github.com/Bifold-Emu/Bifold>。仓库里只有本项目的代码和对 Azahar 及其子模块的补丁（`patches/`）；Azahar 源码由 `scripts/bootstrap.sh` 按固定版本下载，然后打上补丁。所以某个版本的 App 对应的源码，就是同一个提交的本仓库加上 bootstrap 里写明的 Azahar 版本。
 - 本项目不包含、也不会下载任何游戏、系统固件或密钥。
 - Nintendo 3DS 是任天堂的商标。本项目与任天堂无关，也未获其授权或认可。
