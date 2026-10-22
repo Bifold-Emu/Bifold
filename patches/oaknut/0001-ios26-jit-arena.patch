@@ -1,0 +1,337 @@
+diff --git a/include/oaknut/code_block.hpp b/include/oaknut/code_block.hpp
+index bfa87d9..a08f1d2 100644
+--- a/include/oaknut/code_block.hpp
++++ b/include/oaknut/code_block.hpp
+@@ -17,12 +17,234 @@
+ #    include <pthread.h>
+ #    include <sys/mman.h>
+ #    include <unistd.h>
++#    if TARGET_OS_IPHONE
++#        include <cstdio>
++#        include <cstdlib>
++#        include <cstring>
++#        include <iterator>
++#        include <map>
++#        include <mutex>
++#        include <mach/mach.h>
++#        include <mach/vm_map.h>
++#        include <sys/sysctl.h>
++#        include <sys/types.h>
++#    endif
+ #else
+ #    include <sys/mman.h>
+ #endif
+ 
+ namespace oaknut {
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++namespace ios_jit {
++
++// iOS 26 on TXM/SPTM hardware (A15/M2 and newer) no longer lets a process make its own pages
++// executable, even with CS_DEBUGGED. The only working route is to have an attached debugger
++// (StikDebug running its "universal" JIT script) prepare an RX region for us. We then create a
++// writable alias of the same physical pages with vm_remap and write code through that alias.
++//
++// Protocol (StikDebug Scripts/universal.js, CMD_PREPARE_REGION):
++//   x16 = 1, x0 = address (0 = debugger allocates), x1 = length, then `brk #0xf00d`.
++//   The script returns the RX address in x0.
++//
++// Older devices / iOS versions keep using the classic path: CS_DEBUGGED lets us mprotect
++// between RW and RX (this is what upstream oaknut already did).
++//
++// Mode selection (environment variable OAKNUT_IOS_JIT_MODE, set by the frontend):
++//   "legacy"    → always mprotect toggling
++//   "universal" → always ask the debugger script for a region
++//   unset/"auto"→ universal if a debugger is still attached to us, otherwise legacy.
++// OAKNUT_IOS_JIT_ARENA_MB sets the size of the single region requested in universal mode.
++
++enum class Mode {
++    Legacy,
++    Universal,
++};
++
++__attribute__((naked, noinline)) inline void* JIT26PrepareRegion(void* /*addr*/, std::size_t /*len*/)
++{
++    asm volatile(
++        "mov x16, #1\n"
++        "brk #0xf00d\n"
++        "ret\n");
++}
++
++inline bool IsBeingTraced()
++{
++#    ifndef P_TRACED
++    constexpr int kPTraced = 0x00000800;
++#    else
++    constexpr int kPTraced = P_TRACED;
++#    endif
++    struct kinfo_proc info;
++    std::memset(&info, 0, sizeof(info));
++    std::size_t size = sizeof(info);
++    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
++    if (sysctl(mib, 4, &info, &size, nullptr, 0) != 0)
++        return false;
++    return (info.kp_proc.p_flag & kPTraced) != 0;
++}
++
++/// True if this process may turn its own pages executable (classic CS_DEBUGGED JIT). On TXM
++/// devices mprotect(PROT_EXEC) "succeeds" but the execute bit is silently stripped, so the
++/// resulting protection is read back from the kernel instead of trusting the return value.
++/// Nothing is ever executed here.
++inline bool LegacyJitWorks()
++{
++    const std::size_t size = 16 * 1024;
++    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
++    if (p == MAP_FAILED)
++        return false;
++    *static_cast<std::uint32_t*>(p) = 0xD65F03C0;  // ret
++    bool ok = mprotect(p, size, PROT_READ | PROT_EXEC) == 0;
++    if (ok) {
++        vm_address_t address = reinterpret_cast<vm_address_t>(p);
++        vm_size_t region_size = 0;
++        vm_region_basic_info_data_64_t info;
++        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
++        mach_port_t object = MACH_PORT_NULL;
++        ok = vm_region_64(mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
++                          reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS
++             && (info.protection & VM_PROT_EXECUTE) != 0;
++    }
++    munmap(p, size);
++    return ok;
++}
++
++inline Mode GetMode()
++{
++    static const Mode mode = [] {
++        const char* env = std::getenv("OAKNUT_IOS_JIT_MODE");
++        if (env && std::strcmp(env, "legacy") == 0)
++            return Mode::Legacy;
++        if (env && std::strcmp(env, "universal") == 0)
++            return Mode::Universal;
++        // Auto: prefer the classic path (also what an Xcode debug session on an older device
++        // needs); fall back to the debugger script only when a debugger is attached and the
++        // classic path does not work.
++        if (LegacyJitWorks())
++            return Mode::Legacy;
++        return IsBeingTraced() ? Mode::Universal : Mode::Legacy;
++    }();
++    return mode;
++}
++
++constexpr std::size_t kGranule = 16 * 1024;
++
++inline std::size_t RoundUp(std::size_t v)
++{
++    return (v + kGranule - 1) & ~(kGranule - 1);
++}
++
++/// One debugger-prepared RX region with a RW alias, sub-allocated first-fit.
++class Arena {
++public:
++    static Arena& Instance()
++    {
++        static Arena arena;
++        return arena;
++    }
++
++    bool Allocate(std::size_t size, std::uint32_t** rw, std::uint32_t** rx)
++    {
++        std::lock_guard lock{mutex};
++        if (!initialized && !Init())
++            return false;
++        size = RoundUp(size);
++        for (auto it = free_list.begin(); it != free_list.end(); ++it) {
++            if (it->second < size)
++                continue;
++            const std::size_t offset = it->first;
++            const std::size_t remaining = it->second - size;
++            free_list.erase(it);
++            if (remaining)
++                free_list.emplace(offset + size, remaining);
++            *rw = reinterpret_cast<std::uint32_t*>(rw_base + offset);
++            *rx = reinterpret_cast<std::uint32_t*>(rx_base + offset);
++            return true;
++        }
++        std::fprintf(stderr, "oaknut: iOS JIT arena exhausted (requested %zu bytes)\n", size);
++        return false;
++    }
++
++    void Free(std::uint32_t* rx, std::size_t size)
++    {
++        std::lock_guard lock{mutex};
++        std::size_t offset = reinterpret_cast<std::uintptr_t>(rx) - rx_base;
++        size = RoundUp(size);
++        // Insert and coalesce with neighbours.
++        auto next = free_list.lower_bound(offset);
++        if (next != free_list.begin()) {
++            auto prev = std::prev(next);
++            if (prev->first + prev->second == offset) {
++                offset = prev->first;
++                size += prev->second;
++                free_list.erase(prev);
++            }
++        }
++        if (next != free_list.end() && offset + size == next->first) {
++            size += next->second;
++            free_list.erase(next);
++        }
++        free_list.emplace(offset, size);
++    }
++
++private:
++    bool Init()
++    {
++        initialized = true;
++        std::size_t mb = 384;
++        if (const char* env = std::getenv("OAKNUT_IOS_JIT_ARENA_MB")) {
++            const long v = std::strtol(env, nullptr, 10);
++            if (v >= 16 && v <= 2048)
++                mb = static_cast<std::size_t>(v);
++        }
++        const std::size_t size = mb * 1024 * 1024;
++
++        std::uintptr_t rx = 0;
++        for (int attempt = 0; attempt < 3 && rx == 0; ++attempt) {
++            void* result = JIT26PrepareRegion(nullptr, size);
++            const auto value = reinterpret_cast<std::uintptr_t>(result);
++            // An unserviced breakpoint can leave garbage (e.g. the brk encoding) in x0, so only
++            // accept page-aligned, plausible user-space addresses.
++            if (value != 0 && (value & (kGranule - 1)) == 0 && value > 0x100000000ull)
++                rx = value;
++        }
++        if (rx == 0) {
++            std::fprintf(stderr, "oaknut: debugger did not provide a JIT region (is StikDebug's universal script attached?)\n");
++            return false;
++        }
++
++        vm_address_t rw = 0;
++        vm_prot_t cur_prot = 0, max_prot = 0;
++        kern_return_t kr = vm_remap(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
++                                    static_cast<vm_address_t>(rx), false, &cur_prot, &max_prot, VM_INHERIT_NONE);
++        if (kr != KERN_SUCCESS) {
++            std::fprintf(stderr, "oaknut: vm_remap of JIT region failed (%d)\n", kr);
++            return false;
++        }
++        kr = vm_protect(mach_task_self(), rw, size, false, VM_PROT_READ | VM_PROT_WRITE);
++        if (kr != KERN_SUCCESS) {
++            std::fprintf(stderr, "oaknut: vm_protect(RW) of JIT alias failed (%d)\n", kr);
++            return false;
++        }
++
++        rx_base = rx;
++        rw_base = static_cast<std::uintptr_t>(rw);
++        free_list.emplace(0, size);
++        return true;
++    }
++
++    std::mutex mutex;
++    bool initialized = false;
++    std::uintptr_t rx_base = 0;
++    std::uintptr_t rw_base = 0;
++    std::map<std::size_t, std::size_t> free_list;  // offset -> length
++};
++
++}  // namespace ios_jit
++#endif
++
+ class CodeBlock {
+ public:
+     explicit CodeBlock(std::size_t size)
+@@ -32,6 +254,13 @@ public:
+         m_memory = (std::uint32_t*)VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+ #elif defined(__APPLE__)
+ #    if TARGET_OS_IPHONE
++        if (ios_jit::GetMode() == ios_jit::Mode::Universal) {
++            m_size = ios_jit::RoundUp(size);
++            if (!ios_jit::Arena::Instance().Allocate(m_size, &m_memory, &m_xmemory))
++                throw std::bad_alloc{};
++            m_dual = true;
++            return;
++        }
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #    else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+@@ -44,8 +273,13 @@ public:
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #endif
+ 
++#if !defined(_WIN32)
++        if (m_memory == (std::uint32_t*)MAP_FAILED)
++            m_memory = nullptr;
++#endif
+         if (m_memory == nullptr)
+             throw std::bad_alloc{};
++        m_xmemory = m_memory;
+     }
+ 
+     ~CodeBlock()
+@@ -56,6 +290,12 @@ public:
+ #if defined(_WIN32)
+         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
+ #else
++#    if defined(__APPLE__) && TARGET_OS_IPHONE
++        if (m_dual) {
++            ios_jit::Arena::Instance().Free(m_xmemory, m_size);
++            return;
++        }
++#    endif
+         munmap(m_memory, m_size);
+ #endif
+     }
+@@ -65,13 +305,22 @@ public:
+     CodeBlock(CodeBlock&&) = delete;
+     CodeBlock& operator=(CodeBlock&&) = delete;
+ 
++    /// Address to *write* code through.
+     std::uint32_t* ptr() const
+     {
+         return m_memory;
+     }
+ 
++    /// Address the code *executes* at. Identical to ptr() except for dual-mapped iOS JIT.
++    std::uint32_t* xptr() const
++    {
++        return m_xmemory;
++    }
++
+     void protect()
+     {
++        if (m_dual)
++            return;
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(1);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+@@ -81,6 +330,8 @@ public:
+ 
+     void unprotect()
+     {
++        if (m_dual)
++            return;
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(0);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+@@ -88,6 +339,7 @@ public:
+ #endif
+     }
+ 
++    /// `mem` is an execution address (inside [xptr(), xptr() + size)).
+     void invalidate(std::uint32_t* mem, std::size_t size)
+     {
+ #if defined(__APPLE__)
+@@ -132,12 +384,14 @@ public:
+ 
+     void invalidate_all()
+     {
+-        invalidate(m_memory, m_size);
++        invalidate(m_xmemory, m_size);
+     }
+ 
+ protected:
+-    std::uint32_t* m_memory;
++    std::uint32_t* m_memory = nullptr;
++    std::uint32_t* m_xmemory = nullptr;
+     std::size_t m_size = 0;
++    bool m_dual = false;
+ };
+ 
+ }  // namespace oaknut

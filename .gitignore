@@ -1,0 +1,14 @@
+/build/
+/external/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+Server/lobby/data/
+.env
+.DS_Store
+*.cst
+*.cia
+*.3ds
+*.cci
+*.cxi
+*.zcia

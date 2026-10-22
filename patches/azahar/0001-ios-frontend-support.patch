@@ -1,0 +1,1106 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 329af28..e4b9764 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -215,6 +215,11 @@ if (ENABLE_ROOM)
+     add_subdirectory(citra_room)
+ endif()
+ 
++# iOS frontend (3DS_iOS project). Sources are copied/linked into src/azios by bootstrap.sh.
++if (ENABLE_AZIOS)
++    add_subdirectory(azios)
++endif()
++
+ if (ENABLE_ROOM_STANDALONE)
+     add_subdirectory(citra_room_standalone)
+ endif()
+diff --git a/src/common/apple_utils.mm b/src/common/apple_utils.mm
+index e42cfc2..d513107 100644
+--- a/src/common/apple_utils.mm
++++ b/src/common/apple_utils.mm
+@@ -2,13 +2,20 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <TargetConditionals.h>
++#import <Foundation/Foundation.h>
++
++#if TARGET_OS_OSX
+ #import <Cocoa/Cocoa.h>
+ #import <CoreGraphics/CoreGraphics.h>
+-#import <Foundation/Foundation.h>
++#else
++#import <UIKit/UIKit.h>
++#endif
+ 
+ namespace AppleUtils {
+ 
+ float GetRefreshRate() { // TODO: How does this handle multi-monitor? -OS
++#if TARGET_OS_OSX
+     NSScreen* screen = [NSScreen mainScreen];
+     if (screen) {
+         NSDictionary* screenInfo = [screen deviceDescription];
+@@ -21,6 +28,13 @@ float GetRefreshRate() { // TODO: How does this handle multi-monitor? -OS
+             return refreshRate;
+         }
+     }
++#else
++    // iOS: ProMotion devices report 120. UIScreen is safe to query from any thread for this.
++    const NSInteger fps = UIScreen.mainScreen.maximumFramesPerSecond;
++    if (fps > 0) {
++        return static_cast<float>(fps);
++    }
++#endif
+ 
+     return 60; // Something went wrong, so just return a generic value
+ }
+diff --git a/src/common/file_util.cpp b/src/common/file_util.cpp
+index 3168a26..a6c013c 100644
+--- a/src/common/file_util.cpp
++++ b/src/common/file_util.cpp
+@@ -1055,12 +1055,50 @@ bool StringReplace(std::string& haystack, const std::string& a, const std::strin
+     return true;
+ }
+ 
++namespace {
++/// A save state can contain absolute host paths from another location of the user directory
++/// (states written before paths were stored relative to it, or by a frontend that does not use
++/// FileUtil::Path everywhere). On iOS this is routine: the app's data container gets a new path
++/// when the app is reinstalled or updated, so every path in an older state points to a directory
++/// the app can no longer reach (the game's own save then fails with "not formatted").
++/// Rebase such a path onto the current user directory when its tail matches the user directory's
++/// last two components (e.g. ".../<old container>/Documents/Azahar/sdmc/..." ->
++/// ".../<new container>/Documents/Azahar/sdmc/...").
++std::string RebaseForeignUserPath(const std::string& path) {
++    const std::string& user_dir = GetUserPath(UserPath::UserDir);
++    if (path.empty() || path.front() != '/' || user_dir.empty() || path.starts_with(user_dir)) {
++        return path;
++    }
++    // Last two components of the user directory, with separators: "/Documents/Azahar/".
++    std::size_t end = user_dir.size();
++    if (user_dir.back() == '/') {
++        --end;
++    }
++    std::size_t cut = user_dir.rfind('/', end - 1);
++    if (cut != std::string::npos && cut > 0) {
++        cut = user_dir.rfind('/', cut - 1);
++    }
++    if (cut == std::string::npos) {
++        return path;
++    }
++    const std::string tail = user_dir.substr(cut); // starts and ends with '/'
++    const std::size_t at = path.find(tail);
++    if (at == std::string::npos) {
++        return path;
++    }
++    return user_dir + path.substr(at + tail.size());
++}
++} // namespace
++
+ std::string SerializePath(const std::string& input, bool is_saving) {
+     auto result = input;
+     StringReplace(result, "%CITRA_ROM_FILE%", g_currentRomPath, is_saving);
+     StringReplace(result, "%CITRA_USER_DIR%", GetUserPath(UserPath::UserDir), is_saving);
+     StringReplace(result, "%CITRA_USER_SDMC%", GetUserPath(UserPath::SDMCDir), is_saving);
+     StringReplace(result, "%CITRA_USER_NAND%", GetUserPath(UserPath::NANDDir), is_saving);
++    if (!is_saving) {
++        result = RebaseForeignUserPath(result);
++    }
+     return result;
+ }
+ 
+diff --git a/src/common/zstd_compression.cpp b/src/common/zstd_compression.cpp
+index fa1ca6a..01f7d60 100644
+--- a/src/common/zstd_compression.cpp
++++ b/src/common/zstd_compression.cpp
+@@ -56,6 +56,106 @@ std::size_t GetDecompressedSize(std::span<const u8> compressed) {
+     return ZSTD_getFrameContentSize(compressed.data(), compressed.size());
+ }
+ 
++ZstdCompressStreamBuf::ZstdCompressStreamBuf(Sink sink_)
++    : sink(std::move(sink_)), context(ZSTD_createCCtx()), input(1 << 20),
++      output(ZSTD_CStreamOutSize()) {
++    if (!context) {
++        ok = false;
++    } else {
++        ZSTD_CCtx_setParameter(static_cast<ZSTD_CCtx*>(context), ZSTD_c_compressionLevel,
++                               ZSTD_CLEVEL_DEFAULT);
++    }
++    setp(input.data(), input.data() + input.size());
++}
++
++ZstdCompressStreamBuf::~ZstdCompressStreamBuf() {
++    ZSTD_freeCCtx(static_cast<ZSTD_CCtx*>(context));
++}
++
++bool ZstdCompressStreamBuf::Drain(int end_directive) {
++    if (!ok) {
++        setp(input.data(), input.data() + input.size());
++        return false;
++    }
++    const auto mode = static_cast<ZSTD_EndDirective>(end_directive);
++    ZSTD_inBuffer in{pbase(), static_cast<std::size_t>(pptr() - pbase()), 0};
++    for (;;) {
++        ZSTD_outBuffer out{output.data(), output.size(), 0};
++        const std::size_t remaining =
++            ZSTD_compressStream2(static_cast<ZSTD_CCtx*>(context), &out, &in, mode);
++        if (ZSTD_isError(remaining)) {
++            LOG_ERROR(Common, "Error compressing ZSTD stream: {}", ZSTD_getErrorName(remaining));
++            ok = false;
++            break;
++        }
++        if (out.pos != 0 && !sink(reinterpret_cast<const u8*>(output.data()), out.pos)) {
++            ok = false;
++            break;
++        }
++        const bool done = mode == ZSTD_e_continue ? in.pos == in.size : remaining == 0;
++        if (done) {
++            break;
++        }
++    }
++    setp(input.data(), input.data() + input.size());
++    return ok;
++}
++
++ZstdCompressStreamBuf::int_type ZstdCompressStreamBuf::overflow(int_type ch) {
++    if (!Drain(ZSTD_e_continue)) {
++        return traits_type::eof();
++    }
++    if (!traits_type::eq_int_type(ch, traits_type::eof())) {
++        *pptr() = traits_type::to_char_type(ch);
++        pbump(1);
++    }
++    return traits_type::not_eof(ch);
++}
++
++int ZstdCompressStreamBuf::sync() {
++    return Drain(ZSTD_e_flush) ? 0 : -1;
++}
++
++bool ZstdCompressStreamBuf::Finish() {
++    return Drain(ZSTD_e_end);
++}
++
++ZstdDecompressStreamBuf::ZstdDecompressStreamBuf(std::span<const u8> compressed)
++    : context(ZSTD_createDCtx()), source(compressed), output(ZSTD_DStreamOutSize()) {
++    failed = context == nullptr;
++    setg(output.data(), output.data(), output.data());
++}
++
++ZstdDecompressStreamBuf::~ZstdDecompressStreamBuf() {
++    ZSTD_freeDCtx(static_cast<ZSTD_DCtx*>(context));
++}
++
++ZstdDecompressStreamBuf::int_type ZstdDecompressStreamBuf::underflow() {
++    if (gptr() < egptr()) {
++        return traits_type::to_int_type(*gptr());
++    }
++    while (!failed) {
++        ZSTD_inBuffer in{source.data(), source.size(), source_pos};
++        ZSTD_outBuffer out{output.data(), output.size(), 0};
++        const std::size_t result =
++            ZSTD_decompressStream(static_cast<ZSTD_DCtx*>(context), &out, &in);
++        source_pos = in.pos;
++        if (ZSTD_isError(result)) {
++            LOG_ERROR(Common, "Error decompressing ZSTD stream: {}", ZSTD_getErrorName(result));
++            failed = true;
++            break;
++        }
++        if (out.pos != 0) {
++            setg(output.data(), output.data(), output.data() + out.pos);
++            return traits_type::to_int_type(*gptr());
++        }
++        if (in.pos == in.size) {
++            break; // no input left and nothing more buffered
++        }
++    }
++    return traits_type::eof();
++}
++
+ std::vector<u8> DecompressDataZSTD(std::span<const u8> compressed) {
+     const std::size_t decompressed_size = GetDecompressedSize(compressed);
+ 
+diff --git a/src/common/zstd_compression.h b/src/common/zstd_compression.h
+index 68d1e1b..86beb1b 100644
+--- a/src/common/zstd_compression.h
++++ b/src/common/zstd_compression.h
+@@ -8,7 +8,9 @@
+ 
+ #pragma once
+ 
++#include <functional>
+ #include <span>
++#include <streambuf>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -57,6 +59,60 @@ namespace Common::Compression {
+  */
+ [[nodiscard]] std::vector<u8> DecompressDataZSTD(std::span<const u8> compressed);
+ 
++/**
++ * Output stream buffer that Zstandard-compresses (default level) everything written to it into
++ * one frame and hands the compressed bytes to `sink` in chunks. Lets large data (save states) be
++ * compressed while it is produced, without first holding all of it uncompressed in memory.
++ * The frame does not record its decompressed size; read it with ZstdDecompressStreamBuf.
++ */
++class ZstdCompressStreamBuf final : public std::streambuf {
++public:
++    using Sink = std::function<bool(const u8* data, std::size_t size)>;
++
++    explicit ZstdCompressStreamBuf(Sink sink);
++    ~ZstdCompressStreamBuf() override;
++
++    /// Ends the frame. Returns false if compressing or the sink failed at any point.
++    [[nodiscard]] bool Finish();
++
++protected:
++    int_type overflow(int_type ch) override;
++    int sync() override;
++
++private:
++    bool Drain(int end_directive);
++
++    Sink sink;
++    void* context;
++    std::vector<char> input;
++    std::vector<char> output;
++    bool ok = true;
++};
++
++/**
++ * Input stream buffer that decompresses Zstandard data chunk by chunk as it is read, with or
++ * without a decompressed size in the frame header.
++ */
++class ZstdDecompressStreamBuf final : public std::streambuf {
++public:
++    explicit ZstdDecompressStreamBuf(std::span<const u8> compressed);
++    ~ZstdDecompressStreamBuf() override;
++
++    [[nodiscard]] bool Failed() const {
++        return failed;
++    }
++
++protected:
++    int_type underflow() override;
++
++private:
++    void* context;
++    std::span<const u8> source;
++    std::size_t source_pos = 0;
++    std::vector<char> output;
++    bool failed = false;
++};
++
+ } // namespace Common::Compression
+ 
+ namespace FileUtil {
+diff --git a/src/core/arm/dynarmic/arm_dynarmic.cpp b/src/core/arm/dynarmic/arm_dynarmic.cpp
+index 7453326..276183c 100644
+--- a/src/core/arm/dynarmic/arm_dynarmic.cpp
++++ b/src/core/arm/dynarmic/arm_dynarmic.cpp
+@@ -2,7 +2,11 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ #include <csignal>
++#include <cstdlib>
+ #include <cstring>
+ #include <dynarmic/interface/A32/a32.h>
+ #include <dynarmic/interface/optimization_flags.h>
+@@ -365,6 +369,19 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
+     }
+     config.coprocessors[15] = std::make_shared<DynarmicCP15>(cp15_state);
+     config.define_unpredictable_behaviour = true;
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // All JIT code on iOS 26 lives in one debugger-prepared arena (see oaknut code_block.hpp),
++    // so keep each dynarmic instance's cache small.
++    config.code_cache_size = 16 * 1024 * 1024;
++    // Test hook: a tiny cache makes dynarmic wipe it every few seconds, which exercises the
++    // mid-run ClearCache path (see dynarmic a32_address_space.cpp return_to_dispatcher).
++    if (const char* mb = std::getenv("AZIOS_JIT_CACHE_MB")) {
++        const long v = std::strtol(mb, nullptr, 10);
++        if (v >= 2 && v <= 128) {
++            config.code_cache_size = static_cast<std::size_t>(v) * 1024 * 1024;
++        }
++    }
++#endif
+ 
+     // Multi-process state
+     config.processor_id = GetID();
+diff --git a/src/core/file_sys/archive_extsavedata.h b/src/core/file_sys/archive_extsavedata.h
+index c1a2a3f..903dbda 100644
+--- a/src/core/file_sys/archive_extsavedata.h
++++ b/src/core/file_sys/archive_extsavedata.h
+@@ -16,6 +16,7 @@
+ #include "core/hle/result.h"
+ #include "core/hle/service/fs/archive.h"
+ #include "network/artic_base/artic_base_client.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -87,7 +88,7 @@ private:
+         ar& boost::serialization::base_object<ArchiveFactory>(*this);
+         ar& boost::serialization::base_object<ArticCacheProvider>(*this);
+         ar & type;
+-        ar & mount_point;
++        ar& FileUtil::Path::make(mount_point);
+     }
+     friend class boost::serialization::access;
+ };
+diff --git a/src/core/file_sys/archive_nand.h b/src/core/file_sys/archive_nand.h
+index e8480a1..0cfaae3 100644
+--- a/src/core/file_sys/archive_nand.h
++++ b/src/core/file_sys/archive_nand.h
+@@ -11,6 +11,7 @@
+ #include <boost/serialization/string.hpp>
+ #include "core/file_sys/archive_backend.h"
+ #include "core/hle/result.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -50,7 +51,7 @@ protected:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveBackend>(*this);
+-        ar & mount_point;
++        ar& FileUtil::Path::make(mount_point);
+         ar & archive_type;
+     }
+     friend class boost::serialization::access;
+@@ -103,7 +104,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveFactory>(*this);
+-        ar & nand_directory;
++        ar& FileUtil::Path::make(nand_directory);
+         ar & archive_type;
+     }
+     friend class boost::serialization::access;
+diff --git a/src/core/file_sys/archive_sdmc.h b/src/core/file_sys/archive_sdmc.h
+index 460c93f..3b7a964 100644
+--- a/src/core/file_sys/archive_sdmc.h
++++ b/src/core/file_sys/archive_sdmc.h
+@@ -11,6 +11,7 @@
+ #include <boost/serialization/string.hpp>
+ #include "core/file_sys/archive_backend.h"
+ #include "core/hle/result.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -47,7 +48,7 @@ protected:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveBackend>(*this);
+-        ar & mount_point;
++        ar& FileUtil::Path::make(mount_point);
+     }
+     friend class boost::serialization::access;
+ };
+@@ -79,7 +80,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveFactory>(*this);
+-        ar & sdmc_directory;
++        ar& FileUtil::Path::make(sdmc_directory);
+     }
+     friend class boost::serialization::access;
+ };
+diff --git a/src/core/file_sys/archive_sdmcwriteonly.h b/src/core/file_sys/archive_sdmcwriteonly.h
+index 3b52c40..30103f7 100644
+--- a/src/core/file_sys/archive_sdmcwriteonly.h
++++ b/src/core/file_sys/archive_sdmcwriteonly.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include "core/file_sys/archive_sdmc.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -65,7 +66,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveFactory>(*this);
+-        ar & sdmc_directory;
++        ar& FileUtil::Path::make(sdmc_directory);
+     }
+     friend class boost::serialization::access;
+ };
+diff --git a/src/core/file_sys/archive_source_sd_savedata.h b/src/core/file_sys/archive_source_sd_savedata.h
+index d116517..ee6819d 100644
+--- a/src/core/file_sys/archive_source_sd_savedata.h
++++ b/src/core/file_sys/archive_source_sd_savedata.h
+@@ -12,6 +12,7 @@
+ #include "core/file_sys/artic_cache.h"
+ #include "core/hle/result.h"
+ #include "network/artic_base/artic_base_client.h"
++#include "common/file_util.h"
+ 
+ namespace Service::FS {
+ enum class ArchiveIdCode : u32;
+@@ -51,7 +52,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArticCacheProvider>(*this);
+-        ar & mount_point;
++        ar& FileUtil::Path::make(mount_point);
+     }
+     friend class boost::serialization::access;
+ };
+diff --git a/src/core/file_sys/archive_systemsavedata.h b/src/core/file_sys/archive_systemsavedata.h
+index 169ed3a..6101f46 100644
+--- a/src/core/file_sys/archive_systemsavedata.h
++++ b/src/core/file_sys/archive_systemsavedata.h
+@@ -14,6 +14,7 @@
+ #include "core/hle/result.h"
+ #include "core/hle/service/fs/archive.h"
+ #include "network/artic_base/artic_base_client.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -56,7 +57,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveFactory>(*this);
+-        ar & base_path;
++        ar& FileUtil::Path::make(base_path);
+     }
+     friend class boost::serialization::access;
+ };
+diff --git a/src/core/file_sys/layered_fs.h b/src/core/file_sys/layered_fs.h
+index 93b8300..ec43c44 100644
+--- a/src/core/file_sys/layered_fs.h
++++ b/src/core/file_sys/layered_fs.h
+@@ -16,6 +16,7 @@
+ #include "common/common_types.h"
+ #include "common/swap.h"
+ #include "core/file_sys/romfs_reader.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -142,8 +143,8 @@ private:
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<RomFSReader>(*this);
+         ar & romfs;
+-        ar & patch_path;
+-        ar & patch_ext_path;
++        ar& FileUtil::Path::make(patch_path);
++        ar& FileUtil::Path::make(patch_ext_path);
+         ar & load_relocations;
+         if (Archive::is_loading::value) {
+             Load();
+diff --git a/src/core/file_sys/savedata_archive.h b/src/core/file_sys/savedata_archive.h
+index bfe8ed9..197933e 100644
+--- a/src/core/file_sys/savedata_archive.h
++++ b/src/core/file_sys/savedata_archive.h
+@@ -9,6 +9,7 @@
+ #include "core/file_sys/directory_backend.h"
+ #include "core/file_sys/file_backend.h"
+ #include "core/hle/result.h"
++#include "common/file_util.h"
+ 
+ namespace FileSys {
+ 
+@@ -43,7 +44,7 @@ private:
+     template <class Archive>
+     void serialize(Archive& ar, const unsigned int) {
+         ar& boost::serialization::base_object<ArchiveBackend>(*this);
+-        ar & mount_point;
++        ar& FileUtil::Path::make(mount_point);
+         ar & allow_zero_size_create;
+     }
+     friend class boost::serialization::access;
+diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
+index 89f925e..7903e2e 100644
+--- a/src/core/hle/kernel/kernel.cpp
++++ b/src/core/hle/kernel/kernel.cpp
+@@ -48,6 +48,24 @@ KernelSystem::KernelSystem(Memory::MemorySystem& memory, Core::Timing& timing,
+ 
+ /// Shutdown the kernel
+ KernelSystem::~KernelSystem() {
++    // Break the reference cycles between kernel objects so that nothing outlives the kernel. A
++    // thread sleeping in an HLE service call owns its request context (wakeup_callback), and the
++    // context owns the thread again and the client process (through its mapped buffers); waiting
++    // threads and the objects they wait on, and mutexes and their holders, also reference each
++    // other. Without this, loading a save state while a thread was in such a wait (frequent:
++    // games stream data from the file system) leaked the whole previous game process: page
++    // table, code set and more, ~60 MB per load in Pokemon Sun, until iOS killed the app.
++    for (auto& manager : thread_managers) {
++        if (!manager) {
++            continue;
++        }
++        for (const auto& thread : manager->GetThreadList()) {
++            thread->wakeup_callback.reset();
++            thread->wait_objects.clear();
++            thread->held_mutexes.clear();
++            thread->pending_mutexes.clear();
++        }
++    }
+     ResetThreadIDs();
+ };
+ 
+diff --git a/src/core/hle/kernel/process.cpp b/src/core/hle/kernel/process.cpp
+index e272bd5..963e55d 100644
+--- a/src/core/hle/kernel/process.cpp
++++ b/src/core/hle/kernel/process.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <atomic>
+ #include <algorithm>
+ #include <memory>
+ #include <boost/serialization/array.hpp>
+@@ -684,11 +685,21 @@ void Process::FreeAllMemory() {
+               resource_limit->GetCurrentValue(ResourceLimitType::Commit));
+ }
+ 
++namespace {
++std::atomic<int> g_live_processes{0};
++} // namespace
++
++int DebugLiveProcessCount() {
++    return g_live_processes.load();
++}
++
+ Kernel::Process::Process(KernelSystem& kernel)
+     : Object(kernel), handle_table(kernel), vm_manager(kernel.memory, *this), kernel(kernel) {
+     kernel.memory.RegisterPageTable(vm_manager.page_table);
++    ++g_live_processes;
+ }
+ Kernel::Process::~Process() {
++    --g_live_processes;
+     LOG_INFO(Kernel, "Cleaning up process {}", process_id);
+ 
+     // Release all objects this process owns first so that their potential destructor can do clean
+diff --git a/src/core/hle/kernel/process.h b/src/core/hle/kernel/process.h
+index 0ea2563..50acd19 100644
+--- a/src/core/hle/kernel/process.h
++++ b/src/core/hle/kernel/process.h
+@@ -254,6 +254,9 @@ private:
+     void serialize(Archive& ar, const unsigned int file_version);
+ };
+ 
++/// Number of Process objects alive (debug: detects processes leaked across save-state loads).
++int DebugLiveProcessCount();
++
+ } // namespace Kernel
+ 
+ BOOST_CLASS_EXPORT_KEY(Kernel::AddressMapping)
+diff --git a/src/core/savestate.cpp b/src/core/savestate.cpp
+index 16c3db6..00c60d1 100644
+--- a/src/core/savestate.cpp
++++ b/src/core/savestate.cpp
+@@ -3,6 +3,8 @@
+ // Refer to the license.txt file included.
+ 
+ #include <chrono>
++#include <istream>
++#include <ostream>
+ #include <sstream>
+ #include <cryptopp/hex.h>
+ #include <fmt/ranges.h>
+@@ -152,26 +154,12 @@ void System::SaveState(u32 slot) const {
+         }
+     }
+ 
+-    std::ostringstream sstream{std::ios_base::binary};
+-    // Serialize
+-    oarchive oa{sstream};
+-    oa&* this;
+-
+-    const std::string& str{sstream.str()};
+-    const auto data = std::span<const u8>{reinterpret_cast<const u8*>(str.data()), str.size()};
+-    auto buffer = Common::Compression::CompressDataZSTDDefault(data);
+-
+     const u64 movie_id = movie.GetCurrentMovieID();
+     const auto path = GetSaveStatePath(title_id, movie_id, slot);
+     if (!FileUtil::CreateFullPath(path)) {
+         throw std::runtime_error("Could not create path " + path);
+     }
+ 
+-    FileUtil::IOFile file(path, "wb");
+-    if (!file) {
+-        throw std::runtime_error("Could not open file " + path);
+-    }
+-
+     CSTHeader header{};
+     header.filetype = header_magic_bytes;
+     header.program_id = title_id;
+@@ -187,8 +175,37 @@ void System::SaveState(u32 slot) const {
+     std::memcpy(header.build_name.data(), build_fullname.c_str(),
+                 std::min(build_fullname.length(), sizeof(header.build_name) - 1));
+ 
+-    if (file.WriteBytes(&header, sizeof(header)) != sizeof(header) ||
+-        file.WriteBytes(buffer.data(), buffer.size()) != buffer.size()) {
++    // Serialize straight into the compressor and the file. Serializing into a string stream
++    // first, as before, held the whole uncompressed state (several hundred MB: all of FCRAM)
++    // up to three times over (stream buffer growth, then the copy for compression), which on
++    // iOS pushed the app past its memory limit. Written to a temporary file and renamed so a
++    // failure cannot leave a truncated save in the slot.
++    const std::string temp_path = path + ".tmp";
++    try {
++        FileUtil::IOFile file(temp_path, "wb");
++        if (!file || file.WriteBytes(&header, sizeof(header)) != sizeof(header)) {
++            throw std::runtime_error("Could not write to file " + temp_path);
++        }
++        Common::Compression::ZstdCompressStreamBuf compressor{
++            [&file](const u8* data, std::size_t size) {
++                return file.WriteBytes(data, size) == size;
++            }};
++        {
++            std::ostream stream{&compressor};
++            oarchive oa{stream};
++            oa&* this;
++        }
++        if (!compressor.Finish() || !file.Close()) {
++            throw std::runtime_error("Could not write to file " + temp_path);
++        }
++    } catch (...) {
++        FileUtil::Delete(temp_path);
++        throw;
++    }
++    if (FileUtil::Exists(path)) {
++        FileUtil::Delete(path);
++    }
++    if (!FileUtil::Rename(temp_path, path)) {
+         throw std::runtime_error("Could not write to file " + path);
+     }
+ }
+@@ -207,10 +224,8 @@ void System::LoadState(u32 slot) {
+     const u64 movie_id = movie.GetCurrentMovieID();
+     const auto path = GetSaveStatePath(title_id, movie_id, slot);
+ 
+-    std::vector<u8> decompressed;
++    std::vector<u8> buffer(FileUtil::GetSize(path) - sizeof(CSTHeader));
+     {
+-        std::vector<u8> buffer(FileUtil::GetSize(path) - sizeof(CSTHeader));
+-
+         FileUtil::IOFile file(path, "rb");
+ 
+         // load header
+@@ -230,16 +245,17 @@ void System::LoadState(u32 slot) {
+         if (file.ReadBytes(buffer.data(), buffer.size()) != buffer.size()) {
+             throw std::runtime_error("Could not read from file at " + path);
+         }
+-        decompressed = Common::Compression::DecompressDataZSTD(buffer);
+     }
+-    std::istringstream sstream{
+-        std::string{reinterpret_cast<char*>(decompressed.data()), decompressed.size()},
+-        std::ios_base::binary};
+-    decompressed.clear();
+ 
+-    // Deserialize
+-    iarchive ia{sstream};
++    // Deserialize while decompressing, chunk by chunk (no full uncompressed copy in memory).
++    // Reads both these and older save states.
++    Common::Compression::ZstdDecompressStreamBuf decompressor{buffer};
++    std::istream stream{&decompressor};
++    iarchive ia{stream};
+     ia&* this;
++    if (decompressor.Failed()) {
++        throw std::runtime_error("Corrupted savestate " + path);
++    }
+ }
+ 
+ std::vector<u8> System::SaveStateBuffer() const {
+diff --git a/src/video_core/rasterizer_cache/rasterizer_cache.h b/src/video_core/rasterizer_cache/rasterizer_cache.h
+index d90c638..f84b169 100644
+--- a/src/video_core/rasterizer_cache/rasterizer_cache.h
++++ b/src/video_core/rasterizer_cache/rasterizer_cache.h
+@@ -1246,6 +1246,15 @@ void RasterizerCache<T>::ClearAll(bool flush) {
+     if (flush) {
+         FlushRegion(0x0, 0xFFFFFFFF);
+     }
++    // Unregister every surface so that its host texture is really released (sentenced, then
++    // garbage collected below). Only clearing page_table, as before, left all of them alive in
++    // slot_surfaces: every save state (which calls ClearAll) leaked the whole texture cache,
++    // about 15 MB of GPU memory per save in Pokemon Sun on iOS.
++    for (auto& [page, surfaces] : page_table) {
++        while (!surfaces.empty()) {
++            UnregisterSurface(surfaces.back());
++        }
++    }
+     // Unmark all of the marked pages
+     for (auto& pair : RangeFromInterval(cached_pages, flush_interval)) {
+         const auto interval = pair.first & flush_interval;
+@@ -1261,6 +1270,9 @@ void RasterizerCache<T>::ClearAll(bool flush) {
+     cached_pages -= flush_interval;
+     dirty_regions.clear();
+     page_table.clear();
++
++    runtime.Finish();
++    RunGarbageCollector();
+ }
+ 
+ template <class T>
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index 5221fdf..395ba4c 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -159,6 +159,18 @@ RendererVulkan::~RendererVulkan() {
+     device.destroyPipeline(cursor_pipeline);
+     device.destroyShaderModule(cursor_vertex_shader);
+     device.destroyShaderModule(cursor_fragment_shader);
++
++#ifdef __APPLE__
++    if (screenshot_buffer) {
++        vmaDestroyBuffer(instance.GetAllocator(), screenshot_buffer, screenshot_allocation);
++    }
++    if (screenshot_frame.image) {
++        device.destroyFramebuffer(screenshot_frame.framebuffer);
++        device.destroyImageView(screenshot_frame.image_view);
++        vmaDestroyImage(instance.GetAllocator(), screenshot_frame.image,
++                        screenshot_frame.allocation);
++    }
++#endif
+ }
+ 
+ void RendererVulkan::PrepareRendertarget() {
+@@ -1188,13 +1200,141 @@ void RendererVulkan::RenderScreenshot() {
+         return;
+     }
+ 
++#ifdef __APPLE__
++    RenderScreenshotCached();
++#else
+     if (!TryRenderScreenshotWithHostMemory()) {
+         RenderScreenshotWithStagingCopy();
+     }
++#endif
+ 
+     settings.screenshot_complete_callback(false);
+ }
+ 
++#ifdef __APPLE__
++// iOS/MoltenVK: creating and destroying a render target and a staging (or imported host)
++// buffer for every screenshot leaked about one screenshot's worth of graphics memory each time
++// (2.8 MB at 1440x480, measured on device), so a session with many screenshots ran into the
++// per-app memory limit. Keep one render target and one staging buffer and reuse them.
++void RendererVulkan::RenderScreenshotCached() {
++    const Layout::FramebufferLayout layout{settings.screenshot_framebuffer_layout};
++    const u32 width = layout.width;
++    const u32 height = layout.height;
++    const u64 size = static_cast<u64>(width) * height * 4;
++
++    if (!screenshot_frame.image || screenshot_frame.width != width ||
++        screenshot_frame.height != height) {
++        scheduler.Finish();
++        main_present_window.RecreateFrame(&screenshot_frame, width, height);
++    }
++    if (screenshot_buffer_size < size) {
++        scheduler.Finish();
++        if (screenshot_buffer) {
++            vmaDestroyBuffer(instance.GetAllocator(), screenshot_buffer, screenshot_allocation);
++            screenshot_buffer = vk::Buffer{};
++        }
++        const VkBufferCreateInfo buffer_info = {
++            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++            .size = size,
++            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++        };
++        const VmaAllocationCreateInfo alloc_create_info = {
++            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
++                     VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
++            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
++        };
++        VkBuffer buffer{};
++        VmaAllocationInfo alloc_info{};
++        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &alloc_create_info, &buffer,
++                            &screenshot_allocation, &alloc_info) != VK_SUCCESS) {
++            LOG_ERROR(Render_Vulkan, "Failed allocating the screenshot buffer");
++            screenshot_buffer_size = 0;
++            return;
++        }
++        screenshot_buffer = vk::Buffer{buffer};
++        screenshot_mapped = alloc_info.pMappedData;
++        screenshot_buffer_size = size;
++    }
++
++    DrawScreens(&screenshot_frame, layout, false);
++
++    scheduler.Record([width, height, source_image = screenshot_frame.image,
++                      staging_buffer = screenshot_buffer](vk::CommandBuffer cmdbuf) {
++        const vk::ImageMemoryBarrier read_barrier = {
++            .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
++            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
++            .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
++            .newLayout = vk::ImageLayout::eTransferSrcOptimal,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .image = source_image,
++            .subresourceRange{
++                .aspectMask = vk::ImageAspectFlagBits::eColor,
++                .baseMipLevel = 0,
++                .levelCount = VK_REMAINING_MIP_LEVELS,
++                .baseArrayLayer = 0,
++                .layerCount = VK_REMAINING_ARRAY_LAYERS,
++            },
++        };
++        const vk::ImageMemoryBarrier write_barrier = {
++            .srcAccessMask = vk::AccessFlagBits::eTransferRead,
++            .dstAccessMask = vk::AccessFlagBits::eMemoryWrite,
++            .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
++            .newLayout = vk::ImageLayout::eTransferSrcOptimal,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .image = source_image,
++            .subresourceRange{
++                .aspectMask = vk::ImageAspectFlagBits::eColor,
++                .baseMipLevel = 0,
++                .levelCount = VK_REMAINING_MIP_LEVELS,
++                .baseArrayLayer = 0,
++                .layerCount = VK_REMAINING_ARRAY_LAYERS,
++            },
++        };
++        static constexpr vk::MemoryBarrier memory_write_barrier = {
++            .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
++            .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
++        };
++        const vk::BufferImageCopy image_copy = {
++            .bufferOffset = 0,
++            .bufferRowLength = 0,
++            .bufferImageHeight = 0,
++            .imageSubresource =
++                {
++                    .aspectMask = vk::ImageAspectFlagBits::eColor,
++                    .mipLevel = 0,
++                    .baseArrayLayer = 0,
++                    .layerCount = 1,
++                },
++            .imageOffset = {0, 0, 0},
++            .imageExtent = {width, height, 1},
++        };
++        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++                               vk::PipelineStageFlagBits::eTransfer,
++                               vk::DependencyFlagBits::eByRegion, {}, {}, read_barrier);
++        cmdbuf.copyImageToBuffer(source_image, vk::ImageLayout::eTransferSrcOptimal,
++                                 staging_buffer, image_copy);
++        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
++                               vk::PipelineStageFlagBits::eAllCommands,
++                               vk::DependencyFlagBits::eByRegion, memory_write_barrier, {},
++                               write_barrier);
++    });
++
++    scheduler.Finish();
++    vmaInvalidateAllocation(instance.GetAllocator(), screenshot_allocation, 0, size);
++    std::memcpy(settings.screenshot_bits, screenshot_mapped, size);
++
++    // Screenshot consumers expect BGRA; swap if the swapchain format is RGBA.
++    if (main_present_window.GetSurfaceFormat() == vk::Format::eR8G8B8A8Unorm) {
++        u8* pixels = static_cast<u8*>(settings.screenshot_bits);
++        for (u32 i = 0; i < width * height; i++) {
++            std::swap(pixels[i * 4 + 0], pixels[i * 4 + 2]);
++        }
++    }
++}
++#endif
++
+ void RendererVulkan::RenderScreenshotWithStagingCopy() {
+     const vk::Device device = instance.GetDevice();
+ 
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.h b/src/video_core/renderer_vulkan/renderer_vulkan.h
+index 2f1c261..8ea6852 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.h
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.h
+@@ -95,6 +95,9 @@ private:
+     void RenderScreenshot();
+     void RenderScreenshotWithStagingCopy();
+     bool TryRenderScreenshotWithHostMemory();
++#ifdef __APPLE__
++    void RenderScreenshotCached();
++#endif
+     void PrepareDraw(Frame* frame, const Layout::FramebufferLayout& layout);
+     void RenderToWindow(PresentWindow& window, const Layout::FramebufferLayout& layout,
+                         bool flipped);
+@@ -130,6 +133,14 @@ private:
+     Scheduler scheduler;
+     RenderManager renderpass_cache;
+     PresentWindow main_present_window;
++#ifdef __APPLE__
++    // Reused by every screenshot (see RenderScreenshotCached).
++    Frame screenshot_frame{};
++    vk::Buffer screenshot_buffer{};
++    VmaAllocation screenshot_allocation{};
++    void* screenshot_mapped = nullptr;
++    u64 screenshot_buffer_size = 0;
++#endif
+     StreamBuffer vertex_buffer;
+     DescriptorUpdateQueue update_queue;
+     RasterizerVulkan rasterizer;
+diff --git a/src/video_core/renderer_vulkan/vk_platform.cpp b/src/video_core/renderer_vulkan/vk_platform.cpp
+index b0a800e..aa3bf5c 100644
+--- a/src/video_core/renderer_vulkan/vk_platform.cpp
++++ b/src/video_core/renderer_vulkan/vk_platform.cpp
+@@ -16,6 +16,9 @@
+ 
+ #include <memory>
+ #include <vector>
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ #include <boost/container/static_vector.hpp>
+ #include <fmt/format.h>
+ 
+@@ -98,9 +101,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugReportCallback(vk::DebugReportFlagsEX
+ 
+ std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
+     [[maybe_unused]] Frontend::GraphicsContext* context) {
+-#ifdef ANDROID
+-    // Android may override the Vulkan driver from the frontend.
+-    if (auto library = context->GetDriverLibrary(); library) {
++#if defined(ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
++    // Android may override the Vulkan driver from the frontend. On iOS the frontend passes the
++    // MoltenVK framework embedded in the app bundle (dlopen cannot find it by leaf name).
++    if (auto library = context->GetDriverLibrary(); library && library->IsLoaded()) {
+         return library;
+     }
+ #endif
+diff --git a/src/video_core/renderer_vulkan/vk_present_window.cpp b/src/video_core/renderer_vulkan/vk_present_window.cpp
+index 91ceba7..2d88489 100644
+--- a/src/video_core/renderer_vulkan/vk_present_window.cpp
++++ b/src/video_core/renderer_vulkan/vk_present_window.cpp
+@@ -2,6 +2,9 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <chrono>
++#include <vector>
++
+ #include "common/microprofile.h"
+ #include "common/settings.h"
+ #include "common/thread.h"
+@@ -328,6 +331,30 @@ void PresentWindow::PresentThread(std::stop_token token) {
+         // Take the frame and notify anyone waiting
+         Frame* frame = present_queue.front();
+         present_queue.pop();
++
++        // Fast-forward on FIFO-only swapchains (MoltenVK on iOS). MoltenVK fetches the
++        // CAMetalDrawable while encoding the present blit, i.e. inside vkQueueSubmit under
++        // scheduler.submit_mutex, and blocks there until the display frees one. That stalls the
++        // scheduler worker, and with it the emulation thread (TickFrame -> WaitWorker), so
++        // emulation can never run faster than the display refresh. While fast-forwarding,
++        // present the newest frame at most every 33 ms (the display always has a free drawable
++        // then) and recycle all other frames without presenting them.
++        std::vector<Frame*> dropped;
++        bool skip_present = false;
++        const auto frame_limit = Settings::GetFrameLimit();
++        if (frame_limit == 0 || frame_limit > 100) {
++            while (!present_queue.empty()) {
++                dropped.push_back(frame);
++                frame = present_queue.front();
++                present_queue.pop();
++            }
++            const auto now = std::chrono::steady_clock::now();
++            if (now - last_fast_forward_present < std::chrono::milliseconds(33)) {
++                skip_present = true;
++            } else {
++                last_fast_forward_present = now;
++            }
++        }
+         frame_cv.notify_one();
+ 
+         // By exchanging the lock ownership we take the swapchain lock
+@@ -335,6 +362,14 @@ void PresentWindow::PresentThread(std::stop_token token) {
+         // lock in WaitPresent is guaranteed to occur after here.
+         std::exchange(lock, std::unique_lock{swapchain_mutex});
+ 
++        for (Frame* old_frame : dropped) {
++            DropFrame(old_frame);
++        }
++        if (skip_present) {
++            lock.unlock();
++            DropFrame(frame);
++            continue;
++        }
+         CopyToSwapchain(frame);
+ 
+         // Free the frame for reuse
+@@ -344,6 +379,25 @@ void PresentWindow::PresentThread(std::stop_token token) {
+     }
+ }
+ 
++void PresentWindow::DropFrame(Frame* frame) {
++    // The frame's render_ready semaphore was signalled by the renderer and present_done was
++    // reset by GetRenderFrame. An empty submission waits on (consumes) the semaphore and
++    // signals the fence, leaving the frame in the same state as after a real present.
++    static constexpr vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
++    const vk::SubmitInfo submit_info = {
++        .waitSemaphoreCount = 1u,
++        .pWaitSemaphores = &frame->render_ready,
++        .pWaitDstStageMask = &wait_stage,
++    };
++    {
++        std::scoped_lock submit_lock{scheduler.submit_mutex};
++        graphics_queue.submit(submit_info, frame->present_done);
++    }
++    std::scoped_lock fl{free_mutex};
++    free_queue.push(frame);
++    free_cv.notify_one();
++}
++
+ void PresentWindow::NotifySurfaceChanged() {
+ #ifdef ANDROID
+     std::scoped_lock lock{recreate_surface_mutex};
+diff --git a/src/video_core/renderer_vulkan/vk_present_window.h b/src/video_core/renderer_vulkan/vk_present_window.h
+index 3773d37..0f83aed 100644
+--- a/src/video_core/renderer_vulkan/vk_present_window.h
++++ b/src/video_core/renderer_vulkan/vk_present_window.h
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <atomic>
++#include <chrono>
+ #include <condition_variable>
+ #include <mutex>
+ #include <queue>
+@@ -72,6 +73,13 @@ private:
+ 
+     void CopyToSwapchain(Frame* frame);
+ 
++    /// Returns a rendered frame to the free pool without presenting it (fast-forward on
++    /// FIFO-only swapchains such as MoltenVK on iOS).
++    void DropFrame(Frame* frame);
++
++    /// Last time a frame was actually presented while fast-forwarding.
++    std::chrono::steady_clock::time_point last_fast_forward_present{};
++
+     vk::RenderPass CreateRenderpass();
+ 
+ private:
+diff --git a/src/video_core/shader/shader_jit_a64_compiler.cpp b/src/video_core/shader/shader_jit_a64_compiler.cpp
+index e1690a8..5641a50 100644
+--- a/src/video_core/shader/shader_jit_a64_compiler.cpp
++++ b/src/video_core/shader/shader_jit_a64_compiler.cpp
+@@ -1043,7 +1043,8 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_
+     code_mem = std::make_unique<oaknut::CodeBlock>(code_size);
+     code_mem->unprotect();
+ 
+-    program = reinterpret_cast<CompiledShader*>(reinterpret_cast<std::byte*>(code_mem->ptr()) +
++    // On iOS 26 the code block may be dual-mapped: write through ptr(), execute at xptr().
++    program = reinterpret_cast<CompiledShader*>(reinterpret_cast<std::byte*>(code_mem->xptr()) +
+                                                 program_offset);
+ 
+     // Copy to executable memory
+diff --git a/src/video_core/shader/shader_jit_a64_compiler.h b/src/video_core/shader/shader_jit_a64_compiler.h
+index b186b3b..c8e941a 100644
+--- a/src/video_core/shader/shader_jit_a64_compiler.h
++++ b/src/video_core/shader/shader_jit_a64_compiler.h
+@@ -40,7 +40,7 @@ public:
+ 
+     void Run(const ShaderSetup& setup, ShaderUnit& state, u32 offset) const {
+         program(&setup.uniforms, &state,
+-                reinterpret_cast<const std::byte*>(code_mem->ptr()) +
++                reinterpret_cast<const std::byte*>(code_mem->xptr()) +
+                     instruction_labels[offset].offset());
+     }
+ 

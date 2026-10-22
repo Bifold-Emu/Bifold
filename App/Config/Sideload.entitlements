@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Sideload / development / enterprise builds.
+  * get-task-allow is added automatically by Xcode for Development signing and by
+    SideStore/AltStore when they re-sign; it is what lets StikDebug attach and enable JIT.
+    Do not add it here: enterprise and ad-hoc profiles reject it.
+  * If your account has the "Increased Memory Limit" capability, add:
+      <key>com.apple.developer.kernel.increased-memory-limit</key><true/>
+-->
+<dict/>
+</plist>

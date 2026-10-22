@@ -1,0 +1,36 @@
+# One VPS: public lobby + one always-on room.
+#   docker compose up -d --build
+# Open UDP 24872 (room) and TCP 5000 (lobby) in your firewall.
+# In the app: Settings › 联机 › 大厅服务器 = http://YOUR_SERVER:5000
+services:
+  lobby:
+    build: ./lobby
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # Rooms that register from inside this Docker network are advertised at this address.
+      LOBBY_PUBLIC_ADDRESS: "${PUBLIC_ADDRESS:?set PUBLIC_ADDRESS=your.server.ip in .env}"
+      LOBBY_ROOM_TTL: "60"
+      # Uncomment to require accounts (lines "username:token"):
+      # LOBBY_USERS_FILE: /data/users.txt
+    volumes:
+      - lobby-data:/data
+
+  room:
+    build: ./room
+    restart: unless-stopped
+    init: true
+    depends_on: [lobby]
+    ports:
+      - "24872:24872/udp"
+    environment:
+      ROOM_NAME: "${ROOM_NAME:-Bifold 公共房间}"
+      ROOM_MAX_MEMBERS: "16"
+      ROOM_PASSWORD: "${ROOM_PASSWORD:-}"
+      LOBBY_URL: "http://lobby:5000"
+      LOBBY_USERNAME: "server"
+      LOBBY_TOKEN: "${LOBBY_TOKEN:-change-me}"
+
+volumes:
+  lobby-data:

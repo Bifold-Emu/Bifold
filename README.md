@@ -1,0 +1,252 @@
+# Bifold：iOS 上的 3DS 模拟器（带联机）
+
+基于 [Azahar](https://github.com/azahar-emu/azahar) 2126.2（Citra 的正式后继项目）的 iOS 应用。Azahar 负责模拟，本项目补上 iOS 需要的部分：
+
+- 原生 SwiftUI 界面
+- Vulkan→Metal 渲染（MoltenVK）
+- 多点触控虚拟手柄、实体手柄 / 键盘 / 陀螺仪
+- iOS 17–26 的 JIT 支持
+- 三种联机方式
+
+> “Bifold” 是占位名，`project.yml` 里改一处就能换。名字里刻意不用 “3DS”/“Nintendo”，因为商标问题会导致 App Store 审核不过。
+
+## 功能
+
+| | |
+|---|---|
+| 游戏格式 | `.3ds/.cci`、`.cxi`、`.3dsx`、`.elf`、`.app`、`.cia`（安装到虚拟 SD 卡），以及 Azahar 的压缩格式 `.zcci/.zcxi/.z3dsx/.zcia`。游戏必须是**解密**的，Azahar 不再支持加密游戏。 |
+| 画面 | Vulkan（MoltenVK）、1×–6× 内部分辨率、异步着色器编译、磁盘着色器缓存、纹理滤镜、竖屏/横屏多种双屏布局、交换上下屏 |
+| 操作 | 多点触控虚拟按键（可在 A/B/X/Y 之间滑动、模拟摇杆、触感反馈）、触摸下屏、MFi/Xbox/PS/Switch 手柄、蓝牙键盘、陀螺仪体感 |
+| 其他 | 即时存档 10 个位置、快进、截图、软件键盘小程序、游戏图标和标题读取、在“文件” App 里可见的数据目录 |
+| **联机** | ① 兼容 Azahar 房间：可以和电脑、安卓上的 Azahar 玩家进同一个房间；② 同一 Wi-Fi 自动发现（Bonjour）；③ 自建服务器：大厅 + 专用房间，Docker 一键部署 |
+| JIT | 侧载版运行时自动检测；iOS 26 的 TXM 设备（A15 及更新）走 StikDebug 通用脚本的双映射内存；没有 JIT 时自动退回解释器 |
+
+## 目录结构
+
+```
+Core/        C++ 前端层（AzaharCore C API）：会话、输入、配置、联机、JIT 检测 + 主机测试
+  include/AzaharCore.h   Swift 直接 import 的 C 接口
+App/         SwiftUI 应用（游戏库、游戏界面、虚拟手柄、联机、设置）
+patches/     对 Azahar / dynarmic / oaknut 的 iOS 补丁
+scripts/     bootstrap.sh、build-core-ios.sh、run-host-tests.sh
+Server/      自建大厅（Python）+ 专用房间（azahar-room）+ docker-compose
+project.yml  XcodeGen 工程描述
+```
+
+## 编译（需要一台 Mac）
+
+需要 Xcode 16+，以及 `brew install cmake ninja xcodegen`。
+
+```bash
+./scripts/bootstrap.sh                          # 拉 Azahar 2126.2 + 子模块（约 1.5 GB），打补丁
+./scripts/build-core-ios.sh                     # 真机：build/ios-sideload/lib/libAzaharCore.a + MoltenVK
+./scripts/build-core-ios.sh --sdk simulator     # 模拟器：build/ios-sim-sideload/…（Apple 芯片 Mac）
+xcodegen generate                               # 生成 Bifold.xcodeproj
+open Bifold.xcodeproj
+```
+
+**真机：** 在 Xcode 里选你的 Team，把 Bundle ID 改成自己的，然后运行。
+
+**模拟器：** 选任意 iPhone 模拟器直接运行（只支持 arm64 模拟器，也就是 Apple 芯片的 Mac）。模拟器版用**软件渲染器**，不用 Vulkan，原因是：
+
+- iOS 模拟器的 Metal 驱动不支持 MoltenVK 用到的纹理缓冲；
+- 一创建 Vulkan 渲染器，进程就会在 `MTLSimDriver` 里崩溃。
+
+模拟器版只适合调界面、调联机，跑不动 3D 游戏。`Core/tests/elf/paint.elf` 是一个会画彩条的测试程序，放进 Bifold › Games 就能在模拟器里看到画面。`scripts/tools/mkcia.py` 能把这类测试程序打包成未加密的测试 CIA（本体、更新、DLC），用来测安装流程。
+
+要做 App Store 版，先 `./scripts/build-core-ios.sh --flavor appstore`，再用 `Bifold-AppStore` scheme 归档。
+
+## 安装与 JIT
+
+JIT 能把 3DS 的 ARM 代码翻译成本机代码执行，速度通常是解释器的好几倍。大部分 3D 游戏离开 JIT 难以全速运行。
+
+| 安装方式 | JIT | 说明 |
+|---|---|---|
+| Xcode 直接装 / SideStore / AltStore（开发证书） | ✅ | 用 [StikDebug](https://github.com/StephenDev0/StikDebug) 开启：在设置里点“用 StikDebug 开启 JIT”，App 会带上 `script-name=universal.js` 跳过去。iOS 17.4–18 走传统模式；iOS 26 + A15 及更新的设备必须用通用脚本。iOS 26.4 上 StikDebug 有过不稳定的报告。 |
+| TrollStore | ✅ | 仅限支持 TrollStore 的旧系统。JIT 模式选“传统”。 |
+| **企业证书** | ❌ | 企业描述文件不带 `get-task-allow`，调试器挂不上去，只能用解释器。而且苹果的企业开发者协议只允许分发给本公司员工，公开分发会被吊销证书，吊销后所有已安装的副本都打不开。自己或公司内部用可以。 |
+| App Store | ❌ | App Store 不允许 JIT。`appstore` 版本在编译时就关掉了 JIT 和 Azahar 内置的密钥。 |
+
+**能上架 App Store 吗？** 可以：
+
+- 苹果从 2024 年起允许模拟器上架（审核指南 4.7），基于 Azahar 核心的 Manic EMU 就在 App Store 上。
+- 要接受的代价：
+  - 没有 JIT，靠解释器跑；
+  - 不能内置任何游戏、BIOS 或密钥，只能让用户自己导入；
+  - App 必须按 GPL-2.0 开源；
+  - 名字、图标、截图都不能用任天堂商标。
+- 风险：GPL 和 App Store 条款之间一直有争议（VLC 2011 年就因此被下架过），Azahar 的贡献者理论上可以要求下架。
+- 建议：上架前先和 Azahar 团队沟通。
+
+## 导入游戏
+
+App 的文件夹在三个地方都能看到：
+
+- **iPhone 上**：「文件」App › 我的 iPhone › Bifold。
+- **Mac**：用数据线连上手机，在 Finder 侧边栏点手机 › 「文件」标签 › Bifold。
+- **Windows**：iTunes 或「Apple 设备」App › 文件共享 › Bifold。
+
+把文件拖进去就行，App 打开或回到前台时会自动处理：
+
+| 放进去的文件 | App 怎么处理 |
+|---|---|
+| `.3ds` `.cci` `.cxi` `.3dsx` 等卡带/程序文件，放在根目录 | 移进 `Games`，直接出现在游戏库 |
+| `.cia` / `.zcia`，放在根目录或 `Games` 里任何位置 | 安装到模拟的 SD 卡。成功后原文件移到 `Games/已安装的 CIA`（设置里可以改成装完直接删除，省空间）；失败移到 `Games/安装失败`，并提示原因 |
+
+也可以在游戏库右上角点 **+**，或者在其他 App 里对文件选"用 Bifold 打开"。
+
+还有几条规则：
+
+- 刚拷进来、还在写入的文件（3 秒内改过）会等下一轮扫描再处理。
+- 游戏运行时不安装，等退出游戏后再装。
+
+**更新（补丁）和 DLC**：直接安装对应的 `.cia` 就行，安装顺序不限。
+
+- **更新**（Title ID 以 `0004000E` 开头）：启动游戏本体时，Azahar 会自动用已安装的更新替换本体的程序和数据。本体是安装的 CIA，还是导入的 `.3ds/.cci` 卡带文件，都一样。
+- **DLC**（`0004008C` 开头）：游戏运行时自己读取。
+- 游戏库里只显示游戏本体，图标下方会标出"更新 v1.2.0 · DLC"。
+
+**加密的 CIA 装不了**：Azahar 安装 CIA 时只接受解密过的内容，加密的会提示"CIA 已加密，需要先解密"。
+- 侧载版内置的密钥也不能用来安装加密 CIA。
+- 请用自己的 3DS（例如 GodMode9）导出解密的 CIA。
+
+## 联机怎么用
+
+联机模拟的是 3DS 的**本地无线**通信（例如宝可梦的交换和对战、怪物猎人的集会所）。所有人要运行同一款游戏、同一个版本，在游戏里选“本地通信/近距离联机”。
+
+1. **同一 Wi-Fi**（最简单）：一个人在“联机 › 创建房间”，其他人在“局域网”标签里直接点它。也可以连房主手机的个人热点。
+2. **直连**：输入房主的 IP 和端口（默认 24872）。外网直连需要房主的路由器把 UDP 端口转发到他的手机，建议改用第 3 种。
+3. **自建服务器**：在 VPS 上 `cd Server && docker compose up -d --build`，然后在设置里填大厅地址 `http://服务器:5000`。“公共大厅”里会列出所有公开房间，包括电脑和安卓上的 Azahar 开的房间。详见 [Server/README.md](Server/README.md)。
+
+联机协议是 Azahar 的 `network_version 4`，可以和同协议版本的 Azahar 桌面版/安卓版互通。
+
+## 系统文件
+
+部分游戏需要从**你自己的** 3DS 导出的系统文件（`aes_keys.txt`、共享字体、系统存档等）。在设置 › 系统 › 导入系统文件，或者用“文件” App 放进 `Bifold/Azahar/sysdata/`。这个项目不提供、也不会下载任何系统文件或游戏。
+
+## 验证情况（请先读这一节）
+
+**在 Linux 上实际跑过的：**
+
+- `Core/` 的 C++ 前端层针对真实的 Azahar 2126.2 源码编译通过，链接了完整的模拟核心。
+- `scripts/run-host-tests.sh` 的 24 项集成测试全部通过：
+  - 读游戏信息；
+  - 启动 ARM 测试程序：JIT 和解释器两种模式都稳定在 60 FPS；
+  - 按键和摇杆输入能传到模拟的 HID；
+  - 软件渲染器输出的画面（导出成图片核对过彩条），以及软件渲染下的截图；
+  - 安装 CIA：
+    - 本体装好后能出现在游戏库并启动（红色画面）；
+    - 装上更新后，启动同一个本体，跑的是更新的代码（绿色画面）；
+    - DLC 被识别为附加内容，不会当成游戏；
+    - 本体是未安装的 `.cxi` 时，更新同样生效；
+    - 加密的 CIA 被正确拒绝。
+  - 加入官方 `azahar-room` 专用房间，并互相收发聊天；
+  - 在设备上开房、另一个客户端加入；
+  - 我们的客户端和官方 `azahar-room` 都向自建大厅注册，并出现在房间列表里。
+- 房间容器的 `entrypoint.sh`：带上 `LOBBY_PUBLIC_ADDRESS` 后，房间以公网地址注册到了大厅。
+
+**在 Mac（Xcode + iOS 26 模拟器）上实际跑过的：**
+
+- `bootstrap.sh` 和三个补丁都能干净地应用；整个 Azahar 核心在 iOS 模拟器 SDK 下编译通过。
+- Swift 代码编译通过；App 能启动，游戏库能列出 `Games` 文件夹里的程序。
+- 测试程序能渲染画面：
+  - 竖屏：上下屏都在灵动岛下方，虚拟按键在下面；
+  - 横屏：左右并排，虚拟按键叠在画面上；
+  - 模拟速度 99–100%。
+- 导入 CIA（模拟器）：
+  - 把本体放在文件夹根目录、更新放在 `Games` 后打开 App：两者自动装上，原文件移进 `Games/已安装的 CIA`；启动本体后画面是更新的代码（绿色）。
+  - App 开着时拖进 DLC：几秒内自动装上，底部横幅提示"已安装 DLC"，图标下显示"更新 v1.1.0 · DLC"。
+  - 坏文件：移到 `Games/安装失败`，并提示原因。
+- 联机：在 App 里创建房间后，
+  - Mac 上看到 App 在监听 UDP 24872；
+  - `dns-sd` 能发现 Bonjour 服务 `_azahar3ds._udp`，TXT 记录里有房间名、游戏名、人数、IP 和端口；
+  - 关闭房间后端口释放。
+
+**在真机（iPhone 14 Pro Max，iOS 26.7.1，免费开发者账号签名）上实际跑过的：**
+
+- 真机版核心和 App 编译、签名、安装都成功。
+- **Vulkan（MoltenVK）渲染正常**：
+  - 测试程序的上下屏画面正确，截图核对过；
+  - 屏幕刷新率 120 Hz。
+- **不开 JIT（解释器）**：测试程序速度 98–108%。
+- **iOS 26 调试器脚本 JIT**：
+  - 用 `scripts/jit/jitd.py` 模拟 StikDebug universal.js；
+  - App 识别为"调试器脚本模式"，申请到 128 MB 的 RX 区；
+  - JIT 下测试程序画面正确，速度约 100%；
+  - 调试器断开后继续运行。
+- **修复了一个只有真机能测出的崩溃**：
+  - 场景：调试器挂上又立刻断开（StikDebug 普通"开启 JIT"就是这样）。
+  - 旧版：在 A15 及更新的 iOS 26 设备上，旧版误判为"传统 JIT 可用"，一运行就 `SIGBUS`。
+  - 现在：先实测页面能不能变成可执行，不能就用解释器。
+
+**在备用机（iPhone 14 Pro Max，iOS 26.6.2）上实际跑过的：**
+
+- 导入 CIA：用 `devicectl` 把文件写进 App 文件夹，模拟 Finder 拷贝。
+  - 本体放根目录、更新放 `Games`：两者自动安装，原文件移到 `Games/已安装的 CIA`。
+  - 启动本体：Vulkan 截图整屏是更新程序的绿色，速度约 100%。
+  - App 开着时放入 DLC：自动安装，游戏库显示"更新 v1.1.0 · DLC"。
+  - 坏文件：被移到 `Games/安装失败`。
+- JIT：
+  - 调试器挂上即断开：正确退回解释器，不崩溃。
+  - 调试器脚本模式：JIT 正常，速度约 100%。
+
+**用真实游戏实测（自己的《精灵宝可梦 太阳》CIA，备用机，2026-10-21）：**
+
+- 导入：
+  - 本体 CIA（3.2 GB，已解密）放进 App 文件夹后自动安装，约 11 秒，游戏库显示中文名和图标。
+  - 1.2 升级包的 NCCH 内容是加密的，Azahar 拒绝安装；App 提示"内容已加密"，并把它移到 `安装失败`。
+- 游玩（用 Debug 版的远程操作通道按键和触屏，JIT 为调试器脚本模式）：
+  - 选简体中文、选外形、用下屏触摸键盘起名，玩到开场动画和主角家里的剧情。
+  - Vulkan 画面、3D 场景、中文字体都正确。
+  - 全程约 100% 速度、30 fps（这款游戏本身的帧率）。
+  - 不开 JIT 时，开头画面也能跑到 100%。
+- 实测发现并修复：
+  - 游戏被系统界面短暂盖住后会保持暂停，画面上却没有任何提示。现在回到 App 时会自动弹出暂停菜单。
+  - 调试器断开后，JIT 状态误报为"未启用"。现在游戏运行期间显示本局实际使用的模式。
+  - 安装加密内容时提示的是"已取消"。现在会先检查，提示"内容已加密"。
+  - 更新版本号按原始数字显示（如 v2112），不再错误换算。
+  - **JIT 崩溃（游玩约 1 小时后，吊桥剧情结束时）**：模拟的 CPU 跳到地址 0，弹出"模拟器出错"。
+    - 原因：dynarmic ARM64 后端的潜在 bug。编译缓存在运行中途写满、被整体清空时，栈上 8 格"返回地址缓存"（RSB）没有跟着清，函数返回时跳进了已被覆盖的代码。原版每核 128 MB 缓存几乎不会满；iOS 上为省内存设成 16 MB，就会被大游戏触发。
+    - 修复（`patches/dynarmic`）：调度器发现编译期间发生过整体清空，就把 RSB 全部重置为"回调度器"。
+    - 验证：同一版本把缓存缩到 2 MB，让清空每隔几秒就发生一次。关掉修复，46 秒就崩溃，出现 1161 次异常；打开修复，连续跑 14 分钟（加载了 11 个代码模块）没有任何异常。
+    - 测试开关（仅 Debug）：启动参数 `-jitCacheMB 2`、`-noRsbReset YES`。
+  - **快进最高只有 100%**：MoltenVK 只有 FIFO 呈现模式，取下一帧画布时会卡住提交线程，连带模拟线程等待。快进时现在只呈现最新一帧（最多约 30 次/秒），其余帧直接丢弃。实测太阳开场快进到约 400%。
+  - **玩到第 3 次左右即时存档时，App 被 iOS 因内存超限（3 GB）强制关闭**。用每批命令后的内存读数（`phys_footprint`）和大块内存的分配调用栈定位到三处问题：
+    - 读档泄漏整个旧游戏进程（约 60 MB/次）：读档时如果有线程正停在服务调用里（游戏常在读文件），线程、请求上下文和进程互相持有引用，旧内核销毁后它们一直留在内存里。修复：内核析构时先断开线程上的这些引用。
+    - 存档泄漏整个纹理缓存（约 15 MB/次）：`RasterizerCache::ClearAll` 只清了索引，表面对象没有释放。修复：先注销所有表面，再回收。
+    - 存档瞬间多占约 1.4 GB：整份状态（含 256 MB 模拟内存）先序列化进内存流，再复制一份去压缩。修复：边序列化边用 zstd 流式压缩写入临时文件，完成后再改名；读档也改成边解压边读。旧存档照样能读。
+    - 修复后：连续 8 次存档加读档，内存稳定在约 1.37 GB，存档时不再有尖峰；主机测试新增"存档 + 3 次读档"用例。
+    - 另外，截图时每次新建再销毁的渲染目标在 MoltenVK 上会残留（约 2.8 MB/张），现在改为复用。
+- 第二次游玩（修复后，英文版存档）：走出家门 → 1 号道路 → 利利小镇 → 遗迹之路 → 吊桥救小星云 → 从哈拉那里领到木木枭 → 和哈乌对战并获胜。对战时上下两块屏幕都有画面（下屏是触摸菜单）。全程 JIT、约 100% 速度，即时存档 / 读档用了几十次，没有再崩溃。
+
+**还没验证的：**
+
+- 更多商业游戏的兼容性；数小时以上的长时间游玩；游戏内存档。测试程序太简单，看不出 JIT 和解释器的速度差别。
+- 两台设备之间实际联机、Docker 镜像构建。（下屏触摸已在太阳里实测：起名键盘、对战菜单。）
+- 用 Finder / iTunes / 「文件」App 的界面实际拖放文件：只用 devicectl（真机）和直接写文件（模拟器）模拟过；「文件」App 里能否看到 Bifold 文件夹也还没在手机屏幕上确认。
+- 真实游戏的更新和 DLC CIA：手头的太阳 1.2 升级包是加密的，只用自己生成的测试 CIA 验证过。
+- 真正的 StikDebug：只用 `jitd.py` 按同样的协议模拟过。
+
+### 不用 StikDebug、在 Mac 上给真机开 JIT（开发用）
+
+`scripts/jit/jitd.py` 是一个 lldb 脚本，按 StikDebug universal.js 的协议处理 `brk #0xf00d`。
+
+```bash
+xcrun devicectl device process launch --device <设备ID> --start-stopped <bundle id> -- -jitArenaMB 128
+xcrun lldb --batch -o "device select <设备ID>" -o "device process attach --pid <pid>" \
+  -o "command script import scripts/jit/jitd.py" -o "jitserve 400 /tmp/jitd.log"
+```
+
+它比 StikDebug 慢得多：
+- lldb 挂着时，App 启动要两三分钟；
+- 每 128 MB 内存池还要再等大约 30 秒。
+
+只建议开发时用。
+
+## 许可
+
+GPL-2.0-or-later，与 Azahar 相同（见 `LICENSE.txt`）。分发编译好的 App（包括 IPA）时，必须同时提供对应的完整源代码。
+
+- 源码仓库：<https://github.com/WuWaA/Bifold>。仓库里只有本项目的代码和对 Azahar 及其子模块的补丁（`patches/`）；Azahar 源码由 `scripts/bootstrap.sh` 按固定版本下载，然后打上补丁。所以某个版本的 App 对应的源码，就是同一个提交的本仓库加上 bootstrap 里写明的 Azahar 版本。
+- 本项目不包含、也不会下载任何游戏、系统固件或密钥。
+- Nintendo 3DS 是任天堂的商标。本项目与任天堂无关，也未获其授权或认可。

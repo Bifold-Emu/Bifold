@@ -1,0 +1,194 @@
+diff --git a/src/dynarmic/CMakeLists.txt b/src/dynarmic/CMakeLists.txt
+index b234cd2..9374496 100644
+--- a/src/dynarmic/CMakeLists.txt
++++ b/src/dynarmic/CMakeLists.txt
+@@ -447,6 +447,10 @@ endif()
+ 
+ if (WIN32)
+     target_sources(dynarmic PRIVATE backend/exception_handler_windows.cpp)
++elseif (APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    # iOS: no fastmem. Installing Mach exception ports would also fight with the debugger
++    # (StikDebug) that keeps JIT alive on iOS 26, so use the no-op handler.
++    target_sources(dynarmic PRIVATE backend/exception_handler_generic.cpp)
+ elseif (APPLE)
+     find_path(MACH_EXC_DEFS_DIR "mach/mach_exc.defs")
+     if (NOT MACH_EXC_DEFS_DIR)
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index bbdf925..4591af6 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "dynarmic/backend/arm64/a32_address_space.h"
+ 
++#include <cstdlib>
++
+ #include "dynarmic/backend/arm64/a32_jitstate.h"
+ #include "dynarmic/backend/arm64/abi.h"
+ #include "dynarmic/backend/arm64/devirtualize.h"
+@@ -318,12 +320,28 @@ void A32AddressSpace::EmitPrelude() {
+ 
+         code.LDR(X0, l_this);
+         code.MOV(X1, Xstate);
++        code.MOV(X2, SP);  // StackLayout of the current run
+         code.LDR(Xscratch0, l_addr);
+         code.BLR(Xscratch0);
+         code.BR(X0);
+ 
+-        const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+-            return self.GetOrEmit(context.GetLocationDescriptor());
++        const auto fn = [](A32AddressSpace& self, A32JitState& context, StackLayout& stack) -> CodePtr {
++            const u64 clears = self.GetClearCount();
++            const CodePtr entry = self.GetOrEmit(context.GetLocationDescriptor());
++            // DYNARMIC_NO_RSB_RESET=1 disables the reset (test hook to reproduce the bug).
++            static const bool reset_disabled = std::getenv("DYNARMIC_NO_RSB_RESET") != nullptr;
++            if (self.GetClearCount() != clears && !reset_disabled) {
++                // The code cache filled up and was wiped while compiling this block, in the
++                // middle of a run. The return stack buffer still holds host pointers into the
++                // old code, which is now being overwritten by new blocks; returning through one
++                // of them executes unrelated code (seen as a guest jump to address 0 in Pokemon
++                // Sun with a 16 MiB cache). Point every entry back at the dispatcher.
++                for (auto& entry_rsb : stack.rsb) {
++                    entry_rsb.target = 0xFFFF'FFFF'FFFF'FFFFull;
++                    entry_rsb.code_ptr = mcl::bit_cast<u64>(self.prelude_info.return_to_dispatcher);
++                }
++            }
++            return entry;
+         };
+ 
+         code.align(8);
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae77..a68adc7 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -23,7 +23,7 @@ namespace Dynarmic::Backend::Arm64 {
+ AddressSpace::AddressSpace(size_t code_cache_size)
+         : code_cache_size(code_cache_size)
+         , mem(code_cache_size)
+-        , code(mem.ptr(), mem.ptr())
++        , code(mem.ptr(), mem.xptr())
+         , fastmem_manager(exception_handler) {
+     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
+ 
+@@ -95,10 +95,11 @@ void AddressSpace::ClearCache() {
+     block_infos.clear();
+     block_references.clear();
+     code.set_offset(prelude_info.end_of_prelude);
++    ++clear_count;
+ }
+ 
+ void AddressSpace::DumpDisassembly() const {
+-    for (u32* ptr = mem.ptr(); ptr < code.xptr<u32*>(); ptr++) {
++    for (u32* ptr = mem.xptr(); ptr < code.xptr<u32*>(); ptr++) {
+         std::printf("%s", Common::DisassembleAArch64(*ptr, mcl::bit_cast<u64>(ptr)).c_str());
+     }
+ }
+@@ -136,7 +137,7 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, target] : block_info.relocations) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.ptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(block_info.entry_point + ptr_offset));
+ 
+         switch (target) {
+@@ -276,7 +277,7 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, type] : block_relocations_list) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.ptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
+ 
+         switch (type) {
+diff --git a/src/dynarmic/backend/arm64/address_space.h b/src/dynarmic/backend/arm64/address_space.h
+index 835566b..dabbe82 100644
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -42,6 +42,9 @@ public:
+     void InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors);
+ 
+     void ClearCache();
++    /// Incremented by every ClearCache(). Lets the dispatcher notice that the cache was wiped
++    /// while it was compiling a block in the middle of a run (see A32AddressSpace::EmitPrelude).
++    u64 GetClearCount() const { return clear_count; }
+ 
+     void DumpDisassembly() const;
+ 
+@@ -70,6 +73,7 @@ protected:
+     FakeCall FastmemCallback(u64 host_pc);
+ 
+     const size_t code_cache_size;
++    u64 clear_count = 0;
+     oaknut::CodeBlock mem;
+     oaknut::CodeGenerator code;
+ 
+diff --git a/src/dynarmic/backend/exception_handler_macos.cpp b/src/dynarmic/backend/exception_handler_macos.cpp
+index bac8d9c..7984820 100644
+--- a/src/dynarmic/backend/exception_handler_macos.cpp
++++ b/src/dynarmic/backend/exception_handler_macos.cpp
+@@ -274,7 +274,7 @@ void ExceptionHandler::Register(X64::BlockOfCode& code) {
+ }
+ #elif defined(MCL_ARCHITECTURE_ARM64)
+ void ExceptionHandler::Register(oaknut::CodeBlock& mem, std::size_t size) {
+-    const u64 code_begin = mcl::bit_cast<u64>(mem.ptr());
++    const u64 code_begin = mcl::bit_cast<u64>(mem.xptr());
+     const u64 code_end = code_begin + size;
+     impl = std::make_unique<Impl>(code_begin, code_end);
+ }
+diff --git a/src/dynarmic/backend/exception_handler_posix.cpp b/src/dynarmic/backend/exception_handler_posix.cpp
+index 2d6d6ea..3e5081e 100644
+--- a/src/dynarmic/backend/exception_handler_posix.cpp
++++ b/src/dynarmic/backend/exception_handler_posix.cpp
+@@ -308,7 +308,7 @@ void ExceptionHandler::Register(X64::BlockOfCode& code) {
+ }
+ #elif defined(MCL_ARCHITECTURE_ARM64)
+ void ExceptionHandler::Register(oaknut::CodeBlock& mem, std::size_t size) {
+-    const u64 code_begin = mcl::bit_cast<u64>(mem.ptr());
++    const u64 code_begin = mcl::bit_cast<u64>(mem.xptr());
+     const u64 code_end = code_begin + size;
+     impl = std::make_unique<Impl>(code_begin, code_end);
+ }
+diff --git a/src/dynarmic/common/spin_lock_arm64.cpp b/src/dynarmic/common/spin_lock_arm64.cpp
+index ccf807e..8b5f5a4 100644
+--- a/src/dynarmic/common/spin_lock_arm64.cpp
++++ b/src/dynarmic/common/spin_lock_arm64.cpp
+@@ -50,11 +50,18 @@ struct SpinLockImpl {
+ };
+ 
+ std::once_flag flag;
+-SpinLockImpl impl;
++
++// Constructed on first use instead of at static-initialisation time: on iOS allocating a JIT
++// code block before main() crashes when JIT is unavailable, and would run before the frontend
++// has chosen the JIT memory mode.
++SpinLockImpl& Impl() {
++    static SpinLockImpl impl;
++    return impl;
++}
+ 
+ SpinLockImpl::SpinLockImpl()
+         : mem{4096}
+-        , code{mem.ptr(), mem.ptr()} {}
++        , code{mem.ptr(), mem.xptr()} {}
+ 
+ void SpinLockImpl::Initialize() {
+     mem.unprotect();
+@@ -74,13 +81,13 @@ void SpinLockImpl::Initialize() {
+ }  // namespace
+ 
+ void SpinLock::Lock() {
+-    std::call_once(flag, &SpinLockImpl::Initialize, impl);
+-    impl.lock(&storage);
++    std::call_once(flag, [] { Impl().Initialize(); });
++    Impl().lock(&storage);
+ }
+ 
+ void SpinLock::Unlock() {
+-    std::call_once(flag, &SpinLockImpl::Initialize, impl);
+-    impl.unlock(&storage);
++    std::call_once(flag, [] { Impl().Initialize(); });
++    Impl().unlock(&storage);
+ }
+ 
+ }  // namespace Dynarmic
