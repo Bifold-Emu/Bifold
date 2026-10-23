@@ -18,6 +18,8 @@ final class EmulatorCore: ObservableObject {
 
     @Published private(set) var state: RunState = .idle
     @Published private(set) var perf = AZPerfStats()
+    /// A save/load state request that failed while the game kept running (raw core message).
+    @Published private(set) var stateError: String?
     @Published private(set) var currentGame: Game?
     @Published var isFastForward = false {
         didSet { az_set_speed_override(isFastForward ? Double(AppSettings.shared.fastForwardSpeed) : 0) }
@@ -112,6 +114,10 @@ final class EmulatorCore: ObservableObject {
             Task { @MainActor in
                 let core = EmulatorCore.shared
                 var stats = AZPerfStats()
+                if let c = az_take_state_error() {
+                    core.stateError = String(cString: c)
+                    az_free(c)
+                }
                 if az_get_perf_stats(&stats) {
                     core.perf = stats
                     if case .loading = core.state, stats.system_fps > 0 { core.state = .running }

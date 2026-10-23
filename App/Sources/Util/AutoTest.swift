@@ -72,9 +72,9 @@ enum AutoTest {
                 waited += 2
                 var s = AZPerfStats()
                 let ok = az_get_perf_stats(&s)
-                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d",
+                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d vfp=%d",
                            waited, az_is_running() ? 1 : 0, ok ? 1 : 0, s.game_fps,
-                           s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0)
+                           s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0, az_debug_vfp_native(-1))
                     + " state=\(String(describing: core.state))")
                 if waited >= delay && waited < delay + 2 {
                     if let url = await core.screenshot() {
@@ -346,6 +346,9 @@ enum RemotePlay {
                 // pgo: write the PGO counters of an instrumented build to remote/interp.profraw.
                 let rc = az_debug_write_pgo_profile(dir.appendingPathComponent("interp.profraw").path)
                 log("pgo rc=\(rc)")
+            case "vfp":
+                // vfp 0|1: VFP arithmetic in software / on the host FPU (for in-process A/B runs).
+                log("vfp \(az_debug_vfp_native(Int32(n(1, 1))))")
             case "prof":
                 // prof seconds hz: sample the emulation thread's stack into remote/prof.txt.
                 let secs = n(1, 10), hz = n(2, 1000)

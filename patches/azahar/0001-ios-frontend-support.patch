@@ -296,10 +296,18 @@ index 68d1e1b..86beb1b 100644
  
  namespace FileUtil {
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 37eee4f..627dc3c 100644
+index 37eee4f..a165a2e 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -556,3 +556,10 @@ endif()
+@@ -25,6 +25,7 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
+     arm/skyeye_common/vfp/vfp.cpp
+     arm/skyeye_common/vfp/vfp.h
+     arm/skyeye_common/vfp/vfp_helper.h
++    arm/skyeye_common/vfp/vfp_native.h
+     arm/skyeye_common/vfp/vfpdouble.cpp
+     arm/skyeye_common/vfp/vfpinstr.cpp
+     arm/skyeye_common/vfp/vfpsingle.cpp
+@@ -556,3 +557,10 @@ endif()
  if (CITRA_USE_PRECOMPILED_HEADERS)
      target_precompile_headers(citra_core PRIVATE precompiled_headers.h)
  endif()
@@ -347,7 +355,7 @@ index 7453326..276183c 100644
      // Multi-process state
      config.processor_id = GetID();
 diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
-index d1a6c38..b4e77b0 100644
+index d1a6c38..75f452f 100644
 --- a/src/core/arm/dyncom/arm_dyncom.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom.cpp
 @@ -2,6 +2,7 @@
@@ -358,7 +366,7 @@ index d1a6c38..b4e77b0 100644
  #include <algorithm>
  #include <cstring>
  #include <memory>
-@@ -19,9 +20,13 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
+@@ -19,15 +20,24 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
                         std::shared_ptr<Core::Timing::Timer> timer)
      : ARM_Interface(id, timer), system(system_) {
      state = std::make_unique<ARMul_State>(system, memory, initial_mode);
@@ -373,7 +381,19 @@ index d1a6c38..b4e77b0 100644
  
  void ARM_DynCom::Run() {
      if (break_flag) [[unlikely]] {
-@@ -38,8 +43,10 @@ void ARM_DynCom::Step() {
+         return;
+     }
+-    ExecuteInstructions(std::max<s64>(timer->GetDowncount(), 0));
++    // The downcount is in ticks. Above 100 % CPU clock an instruction is worth less than a tick,
++    // so `downcount` instructions no longer fill the slice: it shrank towards one tick and, with
++    // the fraction dropped, never ended (the emulation froze). Below 100 % the old behaviour
++    // (run `downcount` instructions, overshoot the slice) is kept as it was.
++    ExecuteInstructions(std::max<u64>(timer->GetDowncountInstructions(),
++                                      std::max<s64>(timer->GetDowncount(), 0)));
+ }
+ 
+ void ARM_DynCom::Step() {
+@@ -38,8 +48,10 @@ void ARM_DynCom::Step() {
  }
  
  void ARM_DynCom::ClearInstructionCache() {
@@ -386,7 +406,7 @@ index d1a6c38..b4e77b0 100644
  }
  
  void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
-@@ -47,6 +54,10 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+@@ -47,6 +59,10 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
  }
  
  void ARM_DynCom::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) {
@@ -413,7 +433,7 @@ index 47d2606..6637e22 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..b626916 100644
+index 781ff3d..dd17fec 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,8 @@
@@ -662,7 +682,19 @@ index 781ff3d..b626916 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -946,7 +973,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -924,6 +951,11 @@ MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
+ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+     MICROPROFILE_SCOPE(DynCom_Execute);
+ 
++#ifdef AZ_VFP_NATIVE
++    // The host FPU runs in the guest's VFP mode while guest code runs (vfp_native.h).
++    VfpNative::GuestWindow vfp_window{cpu};
++#endif
++
+ #ifdef ENABLE_GDBSTUB
+     /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
+     GDBStub::BreakpointAddress breakpoint_data;
+@@ -946,7 +978,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -671,7 +703,7 @@ index 781ff3d..b626916 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1646,15 +1673,28 @@ DISPATCH: {
+@@ -1646,15 +1678,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -709,7 +741,7 @@ index 781ff3d..b626916 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -2038,7 +2078,7 @@ LDC_INST: {
+@@ -2038,7 +2083,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -718,7 +750,7 @@ index 781ff3d..b626916 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2105,19 @@ LDM_INST: {
+@@ -2065,19 +2110,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -750,7 +782,7 @@ index 781ff3d..b626916 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2165,7 @@ SXTH_INST: {
+@@ -2125,7 +2170,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -759,7 +791,7 @@ index 781ff3d..b626916 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2186,7 @@ LDR_INST: {
+@@ -2146,7 +2191,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -768,7 +800,7 @@ index 781ff3d..b626916 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2229,7 @@ UXTAH_INST: {
+@@ -2189,7 +2234,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -777,7 +809,7 @@ index 781ff3d..b626916 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2241,7 @@ LDRB_INST: {
+@@ -2201,7 +2246,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -786,7 +818,7 @@ index 781ff3d..b626916 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2262,7 @@ LDRD_INST: {
+@@ -2222,7 +2267,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -795,7 +827,7 @@ index 781ff3d..b626916 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2337,7 @@ LDREXD_INST: {
+@@ -2297,7 +2342,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -804,7 +836,7 @@ index 781ff3d..b626916 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2349,7 @@ LDRH_INST: {
+@@ -2309,7 +2354,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -813,7 +845,7 @@ index 781ff3d..b626916 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2364,7 @@ LDRSB_INST: {
+@@ -2324,7 +2369,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -822,7 +854,7 @@ index 781ff3d..b626916 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2380,7 @@ LDRSH_INST: {
+@@ -2340,7 +2385,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -831,7 +863,7 @@ index 781ff3d..b626916 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3605,7 @@ STM_INST: {
+@@ -3565,7 +3610,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -840,7 +872,7 @@ index 781ff3d..b626916 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3633,14 @@ STM_INST: {
+@@ -3593,15 +3638,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -863,7 +895,7 @@ index 781ff3d..b626916 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3674,7 @@ SXTB_INST: {
+@@ -3635,7 +3679,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -872,7 +904,7 @@ index 781ff3d..b626916 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3714,7 @@ UXTAB_INST: {
+@@ -3675,7 +3719,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -881,7 +913,7 @@ index 781ff3d..b626916 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3726,7 @@ STRB_INST: {
+@@ -3687,7 +3731,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -890,7 +922,7 @@ index 781ff3d..b626916 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3743,7 @@ STRBT_INST: {
+@@ -3704,7 +3748,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -899,7 +931,7 @@ index 781ff3d..b626916 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3844,7 @@ STREXH_INST: {
+@@ -3805,7 +3849,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -908,7 +940,7 @@ index 781ff3d..b626916 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3857,7 @@ STRH_INST: {
+@@ -3818,7 +3862,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -917,6 +949,28 @@ index 781ff3d..b626916 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
+@@ -3871,11 +3915,16 @@ SUB_INST: {
+ SWI_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         swi_inst* const inst_cream = (swi_inst*)inst_base->component;
+-        cpu->system.GetRunningCore().GetTimer().AddTicks(num_instrs);
+-        cpu->NumInstrsToExecute =
+-            num_instrs >= cpu->NumInstrsToExecute ? 0 : cpu->NumInstrsToExecute - num_instrs;
+-        num_instrs = 0;
+-        Kernel::SVCContext{cpu->system}.CallSVC(inst_cream->num & 0xFFFF);
++        {
++#ifdef AZ_VFP_NATIVE
++            VfpNative::HostCall(cpu); // the timer and the kernel use floating point
++#endif
++            cpu->system.GetRunningCore().GetTimer().AddTicks(num_instrs);
++            cpu->NumInstrsToExecute =
++                num_instrs >= cpu->NumInstrsToExecute ? 0 : cpu->NumInstrsToExecute - num_instrs;
++            num_instrs = 0;
++            Kernel::SVCContext{cpu->system}.CallSVC(inst_cream->num & 0xFFFF);
++        }
+         // The kernel would call ERET to get here, which clears exclusive memory state.
+         cpu->UnsetExclusiveMemoryAddress();
+     }
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
 index 729c407..632252e 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
@@ -980,52 +1034,70 @@ index e67df42..3afe88c 100644
 +/// nearly full.
 +void EnsureTransCacheSpace();
 diff --git a/src/core/arm/skyeye_common/armstate.cpp b/src/core/arm/skyeye_common/armstate.cpp
-index 55abdf1..71ece32 100644
+index 55abdf1..7fb38c3 100644
 --- a/src/core/arm/skyeye_common/armstate.cpp
 +++ b/src/core/arm/skyeye_common/armstate.cpp
-@@ -191,11 +191,11 @@ void ARMul_State::ResetMPCoreCP15Registers() {
+@@ -191,11 +191,17 @@ void ARMul_State::ResetMPCoreCP15Registers() {
      CP15[CP15_TLB_DEBUG_CONTROL] = 0x00000000;
  }
  
 -u8 ARMul_State::ReadMemory8(u32 address) const {
 +u8 ARMul_State::ReadMemory8Slow(u32 address) const {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      return memory.Read8(address);
  }
  
 -u16 ARMul_State::ReadMemory16(u32 address) const {
 +u16 ARMul_State::ReadMemory16Slow(u32 address) const {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      u16 data = memory.Read16(address);
  
      if (InBigEndianMode())
-@@ -204,7 +204,7 @@ u16 ARMul_State::ReadMemory16(u32 address) const {
+@@ -204,7 +210,10 @@ u16 ARMul_State::ReadMemory16(u32 address) const {
      return data;
  }
  
 -u32 ARMul_State::ReadMemory32(u32 address) const {
 +u32 ARMul_State::ReadMemory32Slow(u32 address) const {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      u32 data = memory.Read32(address);
  
      if (InBigEndianMode())
-@@ -213,7 +213,7 @@ u32 ARMul_State::ReadMemory32(u32 address) const {
+@@ -213,7 +222,10 @@ u32 ARMul_State::ReadMemory32(u32 address) const {
      return data;
  }
  
 -u64 ARMul_State::ReadMemory64(u32 address) const {
 +u64 ARMul_State::ReadMemory64Slow(u32 address) const {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      u64 data = memory.Read64(address);
  
      if (InBigEndianMode())
-@@ -222,25 +222,25 @@ u64 ARMul_State::ReadMemory64(u32 address) const {
+@@ -222,25 +234,37 @@ u64 ARMul_State::ReadMemory64(u32 address) const {
      return data;
  }
  
 -void ARMul_State::WriteMemory8(u32 address, u8 data) {
 +void ARMul_State::WriteMemory8Slow(u32 address, u8 data) {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      memory.Write8(address, data);
  }
  
 -void ARMul_State::WriteMemory16(u32 address, u16 data) {
 +void ARMul_State::WriteMemory16Slow(u32 address, u16 data) {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      if (InBigEndianMode())
          data = Common::swap16(data);
  
@@ -1034,6 +1106,9 @@ index 55abdf1..71ece32 100644
  
 -void ARMul_State::WriteMemory32(u32 address, u32 data) {
 +void ARMul_State::WriteMemory32Slow(u32 address, u32 data) {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      if (InBigEndianMode())
          data = Common::swap32(data);
  
@@ -1042,11 +1117,14 @@ index 55abdf1..71ece32 100644
  
 -void ARMul_State::WriteMemory64(u32 address, u64 data) {
 +void ARMul_State::WriteMemory64Slow(u32 address, u64 data) {
++#ifdef AZ_VFP_NATIVE
++    VfpNative::HostCall(const_cast<ARMul_State*>(this)); // MMIO etc. run host code
++#endif
      if (InBigEndianMode())
          data = Common::swap64(data);
  
 diff --git a/src/core/arm/skyeye_common/armstate.h b/src/core/arm/skyeye_common/armstate.h
-index 676fd29..6e6e5ea 100644
+index 676fd29..f21857c 100644
 --- a/src/core/arm/skyeye_common/armstate.h
 +++ b/src/core/arm/skyeye_common/armstate.h
 @@ -22,8 +22,11 @@
@@ -1164,7 +1242,20 @@ index 676fd29..6e6e5ea 100644
      std::array<u32, 16> Reg{}; // The current register file
      std::array<u32, 2> Reg_usr{};
      std::array<u32, 2> Reg_svc{};   // R13_SVC R14_SVC
-@@ -264,6 +340,27 @@ public:
+@@ -233,6 +309,12 @@ public:
+     // VFPv2 and VFPv3-D16 has 16 doubleword registers (D0-D16 or S0-S31).
+     // VFPv3-D32/ASIMD may have up to 32 doubleword registers (D0-D31),
+     // and only 32 singleword registers are accessible (S0-S31).
++    // Bifold (vfp/vfp_native.h): vfp_window while InterpreterMainLoop may run VFP arithmetic on
++    // the host FPU; vfp_live while the host FPU is in the guest's mode, with the host FPCR it
++    // replaced.
++    bool vfp_window = false;
++    bool vfp_live = false;
++    u64 vfp_host_fpcr = 0;
+     std::array<u32, 64> ExtReg{};
+ 
+     u32 Emulate; // To start and stop emulation
+@@ -264,6 +346,27 @@ public:
      // process for our purposes), not per ARMul_State (which tracks CPU core state).
      std::unordered_map<u32, std::size_t> instruction_cache;
  
@@ -1241,6 +1332,889 @@ index bf9299c..4bde4dc 100644
  bool ARMul_AddOverflowQ(u32, u32);
  
  u8 ARMul_SignedSaturatedAdd8(u8, u8);
+diff --git a/src/core/arm/skyeye_common/vfp/vfp.cpp b/src/core/arm/skyeye_common/vfp/vfp.cpp
+index ad4db5f..f19214d 100644
+--- a/src/core/arm/skyeye_common/vfp/vfp.cpp
++++ b/src/core/arm/skyeye_common/vfp/vfp.cpp
+@@ -26,6 +26,12 @@
+ #include "core/arm/skyeye_common/armstate.h"
+ #include "core/arm/skyeye_common/vfp/asm_vfp.h"
+ #include "core/arm/skyeye_common/vfp/vfp.h"
++#include "core/arm/skyeye_common/vfp/vfp_native.h"
++
++#ifdef AZ_VFP_NATIVE
++#include <cstdlib>
++std::atomic<bool> VfpNative::enabled{std::getenv("AZ_VFP_SOFT") == nullptr};
++#endif
+ 
+ void VFPInit(ARMul_State* state) {
+     state->VFP[VFP_FPSID] = VFP_FPSID_IMPLMEN << 24 | VFP_FPSID_SW << 23 | VFP_FPSID_SUBARCH << 16 |
+diff --git a/src/core/arm/skyeye_common/vfp/vfp.h b/src/core/arm/skyeye_common/vfp/vfp.h
+index 73561cd..da415c1 100644
+--- a/src/core/arm/skyeye_common/vfp/vfp.h
++++ b/src/core/arm/skyeye_common/vfp/vfp.h
+@@ -21,6 +21,7 @@
+ #pragma once
+ 
+ #include "core/arm/skyeye_common/vfp/vfp_helper.h" /* for references to cdp SoftFloat functions */
++#include "core/arm/skyeye_common/vfp/vfp_native.h"
+ 
+ #define VFP_DEBUG_UNTESTED(x) LOG_TRACE(Core_ARM11, "in func {}, " #x " untested", __FUNCTION__);
+ #define CHECK_VFP_ENABLED
+@@ -36,6 +37,27 @@ void vfp_raise_exceptions(ARMul_State* state, u32 exceptions, u32 inst, u32 fpsc
+ u32 vfp_single_cpdo(ARMul_State* state, u32 inst, u32 fpscr);
+ u32 vfp_double_cpdo(ARMul_State* state, u32 inst, u32 fpscr);
+ 
++// Runs one VFP data-processing instruction: on the host FPU inside a VfpNative::GuestWindow
++// (vfp_native.h), otherwise in software.
++inline void VfpCpdo(ARMul_State* cpu, u32 instr, bool dp) {
++    const u32 fpscr = cpu->VFP[VFP_FPSCR];
++#ifdef AZ_VFP_NATIVE
++    if (cpu->vfp_window) {
++        if (!cpu->vfp_live)
++            VfpNative::Enter(cpu);
++        u32 nzcv;
++        if (dp ? VfpNative::Double(cpu, instr, fpscr, nzcv)
++               : VfpNative::Single(cpu, instr, fpscr, nzcv)) {
++            if (nzcv) // comparisons
++                cpu->VFP[VFP_FPSCR] = (fpscr & 0x0FFFFFFF) | nzcv;
++            return;
++        }
++    }
++#endif
++    const u32 ret = dp ? vfp_double_cpdo(cpu, instr, fpscr) : vfp_single_cpdo(cpu, instr, fpscr);
++    vfp_raise_exceptions(cpu, ret, instr, fpscr);
++}
++
+ void VMOVBRS(ARMul_State* state, u32 to_arm, u32 t, u32 n, u32* value);
+ void VMOVBRRD(ARMul_State* state, u32 to_arm, u32 t, u32 t2, u32 n, u32* value1, u32* value2);
+ void VMOVBRRSS(ARMul_State* state, u32 to_arm, u32 t, u32 t2, u32 n, u32* value1, u32* value2);
+diff --git a/src/core/arm/skyeye_common/vfp/vfp_native.h b/src/core/arm/skyeye_common/vfp/vfp_native.h
+new file mode 100644
+index 0000000..4b9e21d
+--- /dev/null
++++ b/src/core/arm/skyeye_common/vfp/vfp_native.h
+@@ -0,0 +1,463 @@
++// Bifold: run VFP data-processing instructions on the host FPU (AArch64 only).
++//
++// The guest FPSCR's DN, FZ and RMode bits sit at the same positions as the host FPCR's, and its
++// cumulative exception bits (IOC, DZC, OFC, UFC, IXC, IDC) at the same positions as the host
++// FPSR's. Writing FPCR or reading FPSR stalls the pipeline (a set/restore pair costs about 40 ns
++// on Apple cores, more than the software emulation of an add), so the mode is not switched per
++// instruction. At the first VFP instruction of an InterpreterMainLoop run (Enter) the host FPCR
++// takes the guest's mode, and from then on the host FPSR collects the guest's exception flags.
++// They are folded back into FPSCR (Leave) when the loop returns, when the guest reads FPSCR, and
++// before guest code calls into the rest of the emulator (HostCall: SVCs, MMIO and other slow
++// memory accesses), which must run in the host's own mode. Every floating-point instruction here
++// is inline asm volatile, so the compiler cannot move it across a mode change. Short vectors
++// (FPSCR.LEN != 0) fall back to the software implementation.
++#pragma once
++
++#if defined(__aarch64__)
++#define AZ_VFP_NATIVE 1
++
++#include <atomic>
++#include <bit>
++#include "common/common_types.h"
++#include "core/arm/skyeye_common/armstate.h"
++#include "core/arm/skyeye_common/vfp/asm_vfp.h"
++#include "core/arm/skyeye_common/vfp/vfp_helper.h"
++
++namespace VfpNative {
++
++// Cleared by AZ_VFP_SOFT=1 at startup, or at run time through az_debug_vfp_native().
++extern std::atomic<bool> enabled;
++
++constexpr u32 MODE_MASK = 0x07C00000; // AHP, DN, FZ, RMode
++constexpr u32 EXC_MASK = 0x9F;        // IDC, IXC, UFC, OFC, DZC, IOC
++
++#define AZ_FORCE_INLINE [[gnu::always_inline]] inline
++
++AZ_FORCE_INLINE u64 ReadFpcr() {
++    u64 v;
++    asm volatile("mrs %0, fpcr" : "=r"(v));
++    return v;
++}
++AZ_FORCE_INLINE void WriteFpcr(u64 v) {
++    asm volatile("msr fpcr, %0" : : "r"(v) : "memory");
++}
++AZ_FORCE_INLINE u64 ReadFpsr() {
++    u64 v;
++    asm volatile("mrs %0, fpsr" : "=r"(v));
++    return v;
++}
++AZ_FORCE_INLINE void WriteFpsr(u64 v) {
++    asm volatile("msr fpsr, %0" : : "r"(v) : "memory");
++}
++
++// Host FPU -> guest: fold the exception flags collected so far into FPSCR.
++AZ_FORCE_INLINE void Store(ARMul_State* s) {
++    const u32 flags = static_cast<u32>(ReadFpsr()) & EXC_MASK;
++    if (flags)
++        s->VFP[VFP_FPSCR] |= flags;
++}
++
++// Guest -> host FPU: the guest's mode, no flags pending (they are all in FPSCR already).
++AZ_FORCE_INLINE void Load(ARMul_State* s) {
++    WriteFpsr(0);
++    const u64 mode = s->VFP[VFP_FPSCR] & MODE_MASK;
++    if (ReadFpcr() != mode)
++        WriteFpcr(mode);
++}
++
++// Switch the host FPU to the guest (first VFP instruction of a run) and back.
++inline void Enter(ARMul_State* s) {
++    s->vfp_host_fpcr = ReadFpcr();
++    Load(s);
++    s->vfp_live = true;
++}
++inline void Leave(ARMul_State* s) {
++    Store(s);
++    WriteFpcr(s->vfp_host_fpcr);
++    s->vfp_live = false;
++}
++
++// Lives for one InterpreterMainLoop call: allows the host FPU path; the switch itself happens at
++// the first VFP instruction, so runs without floating point pay nothing.
++class GuestWindow {
++public:
++    explicit GuestWindow(ARMul_State* state) : s(state) {
++        s->vfp_window = enabled.load(std::memory_order_relaxed);
++    }
++    ~GuestWindow() {
++        if (s->vfp_live)
++            Leave(s);
++        s->vfp_window = false;
++    }
++    GuestWindow(const GuestWindow&) = delete;
++    GuestWindow& operator=(const GuestWindow&) = delete;
++
++private:
++    ARMul_State* s;
++};
++
++// Before a call from guest code into host code that may use floating point. The next VFP
++// instruction switches back.
++AZ_FORCE_INLINE void HostCall(ARMul_State* s) {
++    if (s->vfp_live)
++        Leave(s);
++}
++
++#define AZ_VN_BIN(name, insn)                                                                      \
++    AZ_FORCE_INLINE float name(float a, float b) {                                                 \
++        float r;                                                                                   \
++        asm volatile(insn " %s0, %s1, %s2" : "=w"(r) : "w"(a), "w"(b));                            \
++        return r;                                                                                  \
++    }                                                                                              \
++    AZ_FORCE_INLINE double name(double a, double b) {                                              \
++        double r;                                                                                  \
++        asm volatile(insn " %d0, %d1, %d2" : "=w"(r) : "w"(a), "w"(b));                            \
++        return r;                                                                                  \
++    }
++AZ_VN_BIN(Add, "fadd")
++AZ_VN_BIN(Sub, "fsub")
++AZ_VN_BIN(Mul, "fmul")
++AZ_VN_BIN(Div, "fdiv")
++#undef AZ_VN_BIN
++
++AZ_FORCE_INLINE float Sqrt(float a) {
++    float r;
++    asm volatile("fsqrt %s0, %s1" : "=w"(r) : "w"(a));
++    return r;
++}
++AZ_FORCE_INLINE double Sqrt(double a) {
++    double r;
++    asm volatile("fsqrt %d0, %d1" : "=w"(r) : "w"(a));
++    return r;
++}
++
++// FPNeg only flips the sign bit (no flush, no exceptions), so do it on the integer bits.
++AZ_FORCE_INLINE float Neg(float a) {
++    return std::bit_cast<float>(std::bit_cast<u32>(a) ^ 0x80000000u);
++}
++AZ_FORCE_INLINE double Neg(double a) {
++    return std::bit_cast<double>(std::bit_cast<u64>(a) ^ 0x8000000000000000ull);
++}
++
++// Comparisons return the host NZCV, which uses the same encoding as FPSCR[31:28].
++template <bool E, typename T>
++AZ_FORCE_INLINE u32 Cmp(T a, T b) {
++    u64 f;
++    if constexpr (sizeof(T) == 4) {
++        if constexpr (E)
++            asm volatile("fcmpe %s1, %s2\n\tmrs %0, nzcv" : "=r"(f) : "w"(a), "w"(b) : "cc");
++        else
++            asm volatile("fcmp %s1, %s2\n\tmrs %0, nzcv" : "=r"(f) : "w"(a), "w"(b) : "cc");
++    } else {
++        if constexpr (E)
++            asm volatile("fcmpe %d1, %d2\n\tmrs %0, nzcv" : "=r"(f) : "w"(a), "w"(b) : "cc");
++        else
++            asm volatile("fcmp %d1, %d2\n\tmrs %0, nzcv" : "=r"(f) : "w"(a), "w"(b) : "cc");
++    }
++    return static_cast<u32>(f);
++}
++
++template <bool E, typename T>
++AZ_FORCE_INLINE u32 CmpZero(T a) {
++    u64 f;
++    if constexpr (sizeof(T) == 4) {
++        if constexpr (E)
++            asm volatile("fcmpe %s1, #0.0\n\tmrs %0, nzcv" : "=r"(f) : "w"(a) : "cc");
++        else
++            asm volatile("fcmp %s1, #0.0\n\tmrs %0, nzcv" : "=r"(f) : "w"(a) : "cc");
++    } else {
++        if constexpr (E)
++            asm volatile("fcmpe %d1, #0.0\n\tmrs %0, nzcv" : "=r"(f) : "w"(a) : "cc");
++        else
++            asm volatile("fcmp %d1, #0.0\n\tmrs %0, nzcv" : "=r"(f) : "w"(a) : "cc");
++    }
++    return static_cast<u32>(f);
++}
++
++// Float -> 32-bit integer. round: 0 = FPSCR mode, 1 = toward zero.
++template <bool Signed, typename T>
++AZ_FORCE_INLINE u32 ToInt(T a, u32 rmode) {
++    u32 r;
++#define AZ_VN_CVT(op)                                                                              \
++    if constexpr (sizeof(T) == 4)                                                                  \
++        asm volatile(op " %w0, %s1" : "=r"(r) : "w"(a));                                           \
++    else                                                                                           \
++        asm volatile(op " %w0, %d1" : "=r"(r) : "w"(a));
++    if constexpr (Signed) {
++        switch (rmode) {
++        case 0: AZ_VN_CVT("fcvtns") break;
++        case 1: AZ_VN_CVT("fcvtps") break;
++        case 2: AZ_VN_CVT("fcvtms") break;
++        default: AZ_VN_CVT("fcvtzs") break;
++        }
++    } else {
++        switch (rmode) {
++        case 0: AZ_VN_CVT("fcvtnu") break;
++        case 1: AZ_VN_CVT("fcvtpu") break;
++        case 2: AZ_VN_CVT("fcvtmu") break;
++        default: AZ_VN_CVT("fcvtzu") break;
++        }
++    }
++#undef AZ_VN_CVT
++    return r;
++}
++
++template <bool Signed, typename T>
++AZ_FORCE_INLINE T FromInt(u32 v) {
++    T r;
++    if constexpr (sizeof(T) == 4) {
++        if constexpr (Signed)
++            asm volatile("scvtf %s0, %w1" : "=w"(r) : "r"(v));
++        else
++            asm volatile("ucvtf %s0, %w1" : "=w"(r) : "r"(v));
++    } else {
++        if constexpr (Signed)
++            asm volatile("scvtf %d0, %w1" : "=w"(r) : "r"(v));
++        else
++            asm volatile("ucvtf %d0, %w1" : "=w"(r) : "r"(v));
++    }
++    return r;
++}
++
++AZ_FORCE_INLINE double ToDouble(float a) {
++    double r;
++    asm volatile("fcvt %d0, %s1" : "=w"(r) : "w"(a));
++    return r;
++}
++AZ_FORCE_INLINE float ToSingle(double a) {
++    float r;
++    asm volatile("fcvt %s0, %d1" : "=w"(r) : "w"(a));
++    return r;
++}
++
++AZ_FORCE_INLINE float GetS(const ARMul_State* s, u32 r) {
++    return std::bit_cast<float>(s->ExtReg[r]);
++}
++AZ_FORCE_INLINE void PutS(ARMul_State* s, u32 r, float v) {
++    s->ExtReg[r] = std::bit_cast<u32>(v);
++}
++AZ_FORCE_INLINE double GetD(const ARMul_State* s, u32 r) {
++    return std::bit_cast<double>(static_cast<u64>(s->ExtReg[r * 2 + 1]) << 32 |
++                                 s->ExtReg[r * 2]);
++}
++AZ_FORCE_INLINE void PutD(ARMul_State* s, u32 r, double v) {
++    const u64 b = std::bit_cast<u64>(v);
++    s->ExtReg[r * 2] = static_cast<u32>(b);
++    s->ExtReg[r * 2 + 1] = static_cast<u32>(b >> 32);
++}
++
++// Arithmetic shared by single and double precision. FOP_TO_IDX order:
++// 0 VMLA, 1 VNMLS, 2 VMUL, 3 VADD, 4 VMLS, 5 VNMLA, 6 VNMUL, 7 VSUB, 8 VDIV.
++template <typename T>
++AZ_FORCE_INLINE bool Arith(u32 idx, T d, T n, T m, T& r) {
++    switch (idx) {
++    case 0: r = Add(d, Mul(n, m)); return true;
++    case 1: r = Add(Neg(d), Mul(n, m)); return true;
++    case 2: r = Mul(n, m); return true;
++    case 3: r = Add(n, m); return true;
++    case 4: r = Add(d, Neg(Mul(n, m))); return true;
++    case 5: r = Add(Neg(d), Neg(Mul(n, m))); return true;
++    case 6: r = Neg(Mul(n, m)); return true;
++    case 7: r = Sub(n, m); return true;
++    case 8: r = Div(n, m); return true;
++    default: return false;
++    }
++}
++
++// Only while the host FPU is in the guest mode (Enter). Returns false when the instruction should take the software path.
++// On success, `exc` is the new FPSCR NZCV for comparisons and 0 otherwise.
++inline bool Single(ARMul_State* s, u32 inst, u32 fpscr, u32& exc) {
++    const u32 sd = vfp_get_sd(inst);
++    const u32 sm = vfp_get_sm(inst);
++    const bool scalar = (fpscr & FPSCR_LENGTH_MASK) == 0 || (sd & 0x18) == 0;
++    if ((inst & FOP_MASK) != FOP_EXT) {
++        if (!scalar)
++            return false;
++        const float n = GetS(s, vfp_get_sn(inst)), m = GetS(s, sm), d = GetS(s, sd);
++        float r;
++        const bool ok = Arith(FOP_TO_IDX(inst), d, n, m, r);
++        exc = 0;
++        if (!ok)
++            return false;
++        PutS(s, sd, r);
++        return true;
++    }
++    const u32 rmode = (fpscr >> 22) & 3;
++    switch (FEXT_TO_IDX(inst)) {
++    case 0: // VMOV
++        if (!scalar)
++            return false;
++        s->ExtReg[sd] = s->ExtReg[sm];
++        exc = 0;
++        return true;
++    case 1: // VABS
++        if (!scalar)
++            return false;
++        s->ExtReg[sd] = s->ExtReg[sm] & 0x7FFFFFFF;
++        exc = 0;
++        return true;
++    case 2: // VNEG
++        if (!scalar)
++            return false;
++        s->ExtReg[sd] = s->ExtReg[sm] ^ 0x80000000;
++        exc = 0;
++        return true;
++    case 3: { // VSQRT
++        if (!scalar)
++            return false;
++        const float m = GetS(s, sm);
++        const float r = Sqrt(m);
++        exc = 0;
++        PutS(s, sd, r);
++        return true;
++    }
++    case 8:
++    case 9:
++    case 10:
++    case 11: { // VCMP, VCMPE, VCMP #0, VCMPE #0
++        const u32 idx = FEXT_TO_IDX(inst);
++        const float a = GetS(s, sd), b = GetS(s, sm);
++        u32 nzcv;
++        switch (idx) {
++        case 8: nzcv = Cmp<false>(a, b); break;
++        case 9: nzcv = Cmp<true>(a, b); break;
++        case 10: nzcv = CmpZero<false>(a); break;
++        default: nzcv = CmpZero<true>(a); break;
++        }
++        exc = nzcv & 0xF0000000;
++        return true;
++    }
++    case 15: { // VCVT.F64.F32
++        const float m = GetS(s, sm);
++        const double r = ToDouble(m);
++        exc = 0;
++        PutD(s, vfp_get_dd(inst), r);
++        return true;
++    }
++    case 16:
++    case 17: { // VCVT.F32.U32 / VCVT.F32.S32
++        const u32 v = s->ExtReg[sm];
++        const float r = FEXT_TO_IDX(inst) == 16 ? FromInt<false, float>(v) : FromInt<true, float>(v);
++        exc = 0;
++        PutS(s, sd, r);
++        return true;
++    }
++    case 24:
++    case 25:
++    case 26:
++    case 27: { // VCVT{R}.U32.F32 / VCVT{R}.S32.F32
++        const u32 idx = FEXT_TO_IDX(inst);
++        const float m = GetS(s, sm);
++        const u32 mode = (idx & 1) ? 3 : rmode;
++        const u32 r = idx >= 26 ? ToInt<true>(m, mode) : ToInt<false>(m, mode);
++        exc = 0;
++        s->ExtReg[sd] = r;
++        return true;
++    }
++    default:
++        return false;
++    }
++}
++
++inline bool Double(ARMul_State* s, u32 inst, u32 fpscr, u32& exc) {
++    const u32 dd = vfp_get_dd(inst);
++    const u32 dm = vfp_get_dm(inst);
++    const bool scalar = (fpscr & FPSCR_LENGTH_MASK) == 0 || (dd & 0x0c) == 0;
++    if ((inst & FOP_MASK) != FOP_EXT) {
++        if (!scalar)
++            return false;
++        const double n = GetD(s, vfp_get_dn(inst)), m = GetD(s, dm), d = GetD(s, dd);
++        double r;
++        const bool ok = Arith(FOP_TO_IDX(inst), d, n, m, r);
++        exc = 0;
++        if (!ok)
++            return false;
++        PutD(s, dd, r);
++        return true;
++    }
++    const u32 rmode = (fpscr >> 22) & 3;
++    switch (FEXT_TO_IDX(inst)) {
++    case 0: // VMOV
++        if (!scalar)
++            return false;
++        s->ExtReg[dd * 2] = s->ExtReg[dm * 2];
++        s->ExtReg[dd * 2 + 1] = s->ExtReg[dm * 2 + 1];
++        exc = 0;
++        return true;
++    case 1: // VABS
++        if (!scalar)
++            return false;
++        s->ExtReg[dd * 2] = s->ExtReg[dm * 2];
++        s->ExtReg[dd * 2 + 1] = s->ExtReg[dm * 2 + 1] & 0x7FFFFFFF;
++        exc = 0;
++        return true;
++    case 2: // VNEG
++        if (!scalar)
++            return false;
++        s->ExtReg[dd * 2] = s->ExtReg[dm * 2];
++        s->ExtReg[dd * 2 + 1] = s->ExtReg[dm * 2 + 1] ^ 0x80000000;
++        exc = 0;
++        return true;
++    case 3: { // VSQRT
++        if (!scalar)
++            return false;
++        const double m = GetD(s, dm);
++        const double r = Sqrt(m);
++        exc = 0;
++        PutD(s, dd, r);
++        return true;
++    }
++    case 8:
++    case 9:
++    case 10:
++    case 11: {
++        const u32 idx = FEXT_TO_IDX(inst);
++        const double a = GetD(s, dd), b = GetD(s, dm);
++        u32 nzcv;
++        switch (idx) {
++        case 8: nzcv = Cmp<false>(a, b); break;
++        case 9: nzcv = Cmp<true>(a, b); break;
++        case 10: nzcv = CmpZero<false>(a); break;
++        default: nzcv = CmpZero<true>(a); break;
++        }
++        exc = nzcv & 0xF0000000;
++        return true;
++    }
++    case 15: { // VCVT.F32.F64
++        const double m = GetD(s, dm);
++        const float r = ToSingle(m);
++        exc = 0;
++        PutS(s, vfp_get_sd(inst), r);
++        return true;
++    }
++    case 16:
++    case 17: { // VCVT.F64.U32 / VCVT.F64.S32 (source is a single register)
++        const u32 v = s->ExtReg[vfp_get_sm(inst)];
++        const double r =
++            FEXT_TO_IDX(inst) == 16 ? FromInt<false, double>(v) : FromInt<true, double>(v);
++        exc = 0;
++        PutD(s, dd, r);
++        return true;
++    }
++    case 24:
++    case 25:
++    case 26:
++    case 27: { // VCVT{R}.{U,S}32.F64 (destination is a single register)
++        const u32 idx = FEXT_TO_IDX(inst);
++        const double m = GetD(s, dm);
++        const u32 mode = (idx & 1) ? 3 : rmode;
++        const u32 r = idx >= 26 ? ToInt<true>(m, mode) : ToInt<false>(m, mode);
++        exc = 0;
++        s->ExtReg[vfp_get_sd(inst)] = r;
++        return true;
++    }
++    default:
++        return false;
++    }
++}
++
++#undef AZ_FORCE_INLINE
++
++} // namespace VfpNative
++
++#endif
+diff --git a/src/core/arm/skyeye_common/vfp/vfpinstr.cpp b/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
+index a66dc10..37c88ae 100644
+--- a/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
++++ b/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
+@@ -40,14 +40,7 @@ VMLA_INST : {
+ 
+         vmla_inst* inst_cream = (vmla_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vmla_inst));
+@@ -87,14 +80,7 @@ VMLS_INST : {
+ 
+         vmls_inst* inst_cream = (vmls_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vmls_inst));
+@@ -134,14 +120,7 @@ VNMLA_INST : {
+ 
+         vnmla_inst* inst_cream = (vnmla_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vnmla_inst));
+@@ -182,14 +161,7 @@ VNMLS_INST : {
+ 
+         vnmls_inst* inst_cream = (vnmls_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vnmls_inst));
+@@ -229,14 +201,7 @@ VNMUL_INST : {
+ 
+         vnmul_inst* inst_cream = (vnmul_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vnmul_inst));
+@@ -276,14 +241,7 @@ VMUL_INST : {
+ 
+         vmul_inst* inst_cream = (vmul_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vmul_inst));
+@@ -323,14 +281,7 @@ VADD_INST : {
+ 
+         vadd_inst* inst_cream = (vadd_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vadd_inst));
+@@ -370,14 +321,7 @@ VSUB_INST : {
+ 
+         vsub_inst* inst_cream = (vsub_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vsub_inst));
+@@ -417,14 +361,7 @@ VDIV_INST : {
+ 
+         vdiv_inst* inst_cream = (vdiv_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vdiv_inst));
+@@ -557,14 +494,7 @@ VABS_INST : {
+ 
+         vabs_inst* inst_cream = (vabs_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vabs_inst));
+@@ -605,14 +535,7 @@ VNEG_INST : {
+ 
+         vneg_inst* inst_cream = (vneg_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vneg_inst));
+@@ -652,14 +575,7 @@ VSQRT_INST : {
+ 
+         vsqrt_inst* inst_cream = (vsqrt_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vsqrt_inst));
+@@ -699,14 +615,7 @@ VCMP_INST : {
+ 
+         vcmp_inst* inst_cream = (vcmp_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vcmp_inst));
+@@ -746,14 +655,7 @@ VCMP2_INST : {
+ 
+         vcmp2_inst* inst_cream = (vcmp2_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vcmp2_inst));
+@@ -793,14 +695,7 @@ VCVTBDS_INST : {
+ 
+         vcvtbds_inst* inst_cream = (vcvtbds_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vcvtbds_inst));
+@@ -842,14 +737,7 @@ VCVTBFF_INST : {
+ 
+         vcvtbff_inst* inst_cream = (vcvtbff_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vcvtbff_inst));
+@@ -889,14 +777,7 @@ VCVTBFI_INST : {
+ 
+         vcvtbfi_inst* inst_cream = (vcvtbfi_inst*)inst_base->component;
+ 
+-        int ret;
+-
+-        if (inst_cream->dp_operation)
+-            ret = vfp_double_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-        else
+-            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
+-
+-        CHECK_VFP_CDP_RET;
++        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
+     }
+     cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(vcvtbfi_inst));
+@@ -993,6 +874,10 @@ VMSR_INST : {
+ 
+         if (reg == 1) {
+             cpu->VFP[VFP_FPSCR] = cpu->Reg[rt];
++#ifdef AZ_VFP_NATIVE
++            if (cpu->vfp_live) // new mode; flags collected so far are overwritten
++                VfpNative::Load(cpu);
++#endif
+         } else if (cpu->InAPrivilegedMode()) {
+             if (reg == 8)
+                 cpu->VFP[VFP_FPEXC] = cpu->Reg[rt];
+@@ -1096,6 +981,10 @@ VMRS_INST : {
+         if (reg == 1) // FPSCR
+         {
+             if (rt != 15) {
++#ifdef AZ_VFP_NATIVE
++                if (cpu->vfp_live) // the exception flags may still be in the host FPSR
++                    VfpNative::Store(cpu);
++#endif
+                 cpu->Reg[rt] = cpu->VFP[VFP_FPSCR];
+             } else {
+                 cpu->NFlag = (cpu->VFP[VFP_FPSCR] >> 31) & 1;
+diff --git a/src/core/core_timing.cpp b/src/core/core_timing.cpp
+index 0d25069..9c736bc 100644
+--- a/src/core/core_timing.cpp
++++ b/src/core/core_timing.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <random>
+ #include <tuple>
+ #include "common/assert.h"
+@@ -176,7 +177,12 @@ u64 Timing::Timer::GetTicks() const {
+ }
+ 
+ void Timing::Timer::AddTicks(u64 ticks) {
+-    downcount -= static_cast<u64>(ticks * cpu_clock_scale);
++    // Keep the fraction: above 100 % CPU clock a one-instruction run would otherwise count as
++    // 0 ticks, and a slice that has shrunk to one tick would never end (emulation freezes).
++    const double scaled = static_cast<double>(ticks) * cpu_clock_scale + tick_remainder;
++    const u64 whole = static_cast<u64>(scaled);
++    tick_remainder = scaled - static_cast<double>(whole);
++    downcount -= whole;
+ }
+ 
+ u64 Timing::Timer::GetIdleTicks() const {
+@@ -254,4 +260,10 @@ s64 Timing::Timer::GetDowncount() const {
+     return downcount;
+ }
+ 
++u64 Timing::Timer::GetDowncountInstructions() const {
++    if (downcount <= 0)
++        return 0;
++    return static_cast<u64>(std::ceil(static_cast<double>(downcount) / cpu_clock_scale));
++}
++
+ } // namespace Core
+diff --git a/src/core/core_timing.h b/src/core/core_timing.h
+index 7a69afb..fe31a57 100644
+--- a/src/core/core_timing.h
++++ b/src/core/core_timing.h
+@@ -202,6 +202,8 @@ public:
+         void AddTicks(u64 ticks);
+ 
+         s64 GetDowncount() const;
++        /// Guest instructions that fill the rest of the slice at the current clock scale.
++        u64 GetDowncountInstructions() const;
+ 
+         void ForceExceptionCheck(s64 cycles);
+ 
+@@ -235,6 +237,8 @@ public:
+         // Stores a scaling for the internal clockspeed. Changing this number results in
+         // under/overclocking the guest cpu
+         double cpu_clock_scale = 1.0;
++        // Fraction of a tick left over by AddTicks (not serialized).
++        double tick_remainder = 0.0;
+ 
+         template <class Archive>
+         void serialize(Archive& ar, const unsigned int) {
 diff --git a/src/core/file_sys/archive_extsavedata.h b/src/core/file_sys/archive_extsavedata.h
 index c1a2a3f..903dbda 100644
 --- a/src/core/file_sys/archive_extsavedata.h

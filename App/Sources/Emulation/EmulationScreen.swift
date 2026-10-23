@@ -111,6 +111,15 @@ struct EmulationScreen: View {
             }
         }
         .onReceive(core.$perf) { stats in checkSlow(stats) }
+        .onReceive(core.$stateError.compactMap { $0 }) { error in
+            if error.hasPrefix("version:") {
+                show("这个即时存档来自别的版本，读取失败")
+            } else if error.contains("pending async") {
+                show("游戏正在读写数据，即时存档没有完成，请稍后再试")
+            } else {
+                show("即时存档操作失败")
+            }
+        }
         .onChange(of: showMenu) { shown in
             #if DEBUG
             if RemotePlay.enabled { RemotePlay.log("pause menu \(shown ? "shown" : "dismissed")") }

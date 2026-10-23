@@ -147,6 +147,9 @@ uint64_t az_running_title_id(void);
 
 /// Optional extra text for the last error (e.g. missing system file name).
 char* az_last_error_details(void);
+/// A save/load state request that failed while the game kept running, or NULL. Each failure is
+/// returned once ("version:" prefix = state from another build). Free with az_free().
+char* az_take_state_error(void);
 
 typedef struct {
     double system_fps;
@@ -195,6 +198,9 @@ int az_debug_profile(const char* path, int seconds, int hz);
 /// Debug: in a build instrumented with -fprofile-instr-generate, writes the profile counters to
 /// `path` (for PGO). Returns 0 on success, -1 when the build is not instrumented.
 int az_debug_write_pgo_profile(const char* path);
+/// Debug: whether the interpreter runs VFP arithmetic on the host FPU (1) or in software (0);
+/// `set` 0 or 1 changes it, -1 only reads it. Returns -1 where the host FPU path does not exist.
+int az_debug_vfp_native(int set);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the

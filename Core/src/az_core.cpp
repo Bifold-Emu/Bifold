@@ -55,6 +55,12 @@
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_software/renderer_software.h"
 
+#if defined(__aarch64__)
+namespace VfpNative {
+extern std::atomic<bool> enabled; // core/arm/skyeye_common/vfp/vfp_native.h
+}
+#endif
+
 namespace AzIOS {
 
 State& GetState() {
@@ -739,6 +745,21 @@ AZResult az_run_game(const char* path) {
             }
             continue;
         }
+        if (result == Core::System::ResultStatus::ErrorSavestate ||
+            result == Core::System::ResultStatus::ErrorSavestateBuildMismatch) {
+            // A save/load that could not run (pending async operations, a state from another
+            // build, a bad file) leaves the game as it was: report it and keep going, as the
+            // desktop frontend does, instead of ending the session.
+            LOG_WARNING(Frontend, "Save state operation failed: {}", system.GetStatusDetails());
+            std::scoped_lock lock{st.error_mutex};
+            st.state_error = (result == Core::System::ResultStatus::ErrorSavestateBuildMismatch
+                                  ? "version:"
+                                  : "") +
+                             system.GetStatusDetails();
+            if (st.state_error.empty())
+                st.state_error = "unknown";
+            continue;
+        }
         if (result == Core::System::ResultStatus::ShutdownRequested) {
             final_result = AZ_RESULT_SHUTDOWN_REQUESTED;
         } else {
@@ -814,6 +835,16 @@ char* az_last_error_details(void) {
     auto& st = GetState();
     std::scoped_lock lock{st.error_mutex};
     return DupString(st.last_error);
+}
+
+char* az_take_state_error(void) {
+    auto& st = GetState();
+    std::scoped_lock lock{st.error_mutex};
+    if (st.state_error.empty())
+        return nullptr;
+    char* out = DupString(st.state_error);
+    st.state_error.clear();
+    return out;
 }
 
 bool az_get_perf_stats(AZPerfStats* out) {
@@ -1461,6 +1492,16 @@ int az_debug_profile(const char* path, int seconds, int hz) {
 
 // Profile runtime entry points exist only when something was built with -fprofile-instr-generate,
 // so they are looked up at run time.
+int az_debug_vfp_native(int set) {
+#if defined(__aarch64__)
+    if (set >= 0)
+        VfpNative::enabled.store(set != 0, std::memory_order_relaxed);
+    return VfpNative::enabled.load(std::memory_order_relaxed) ? 1 : 0;
+#else
+    return -1;
+#endif
+}
+
 int az_debug_write_pgo_profile(const char* path) {
 #ifdef __APPLE__
     using SetName = void (*)(const char*);

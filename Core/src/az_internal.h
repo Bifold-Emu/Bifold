@@ -139,6 +139,8 @@ struct State {
 
     std::mutex error_mutex;
     std::string last_error;
+    // A save or load that failed while the game kept running (reported once, then cleared).
+    std::string state_error;
 
     bool initialized = false;
 };
