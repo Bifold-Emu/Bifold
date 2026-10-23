@@ -58,6 +58,7 @@
 #if defined(__aarch64__)
 namespace VfpNative {
 extern std::atomic<bool> enabled; // core/arm/skyeye_common/vfp/vfp_native.h
+extern std::atomic<bool> predecoded;
 }
 #endif
 
@@ -1507,9 +1508,13 @@ int az_debug_profile(const char* path, int seconds, int hz) {
 // so they are looked up at run time.
 int az_debug_vfp_native(int set) {
 #if defined(__aarch64__)
-    if (set >= 0)
+    if (set >= 0) {
         VfpNative::enabled.store(set != 0, std::memory_order_relaxed);
-    return VfpNative::enabled.load(std::memory_order_relaxed) ? 1 : 0;
+        VfpNative::predecoded.store(set >= 2, std::memory_order_relaxed);
+    }
+    if (!VfpNative::enabled.load(std::memory_order_relaxed))
+        return 0;
+    return VfpNative::predecoded.load(std::memory_order_relaxed) ? 2 : 1;
 #else
     return -1;
 #endif

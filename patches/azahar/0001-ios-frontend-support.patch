@@ -296,18 +296,19 @@ index 68d1e1b..86beb1b 100644
  
  namespace FileUtil {
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 37eee4f..a165a2e 100644
+index 37eee4f..172237c 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -25,6 +25,7 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
+@@ -25,6 +25,8 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
      arm/skyeye_common/vfp/vfp.cpp
      arm/skyeye_common/vfp/vfp.h
      arm/skyeye_common/vfp/vfp_helper.h
 +    arm/skyeye_common/vfp/vfp_native.h
++    arm/skyeye_common/vfp/vfp_native_op.h
      arm/skyeye_common/vfp/vfpdouble.cpp
      arm/skyeye_common/vfp/vfpinstr.cpp
      arm/skyeye_common/vfp/vfpsingle.cpp
-@@ -556,3 +557,10 @@ endif()
+@@ -556,3 +558,10 @@ endif()
  if (CITRA_USE_PRECOMPILED_HEADERS)
      target_precompile_headers(citra_core PRIVATE precompiled_headers.h)
  endif()
@@ -1333,10 +1334,10 @@ index bf9299c..4bde4dc 100644
  
  u8 ARMul_SignedSaturatedAdd8(u8, u8);
 diff --git a/src/core/arm/skyeye_common/vfp/vfp.cpp b/src/core/arm/skyeye_common/vfp/vfp.cpp
-index ad4db5f..f19214d 100644
+index ad4db5f..2898a3c 100644
 --- a/src/core/arm/skyeye_common/vfp/vfp.cpp
 +++ b/src/core/arm/skyeye_common/vfp/vfp.cpp
-@@ -26,6 +26,12 @@
+@@ -26,6 +26,13 @@
  #include "core/arm/skyeye_common/armstate.h"
  #include "core/arm/skyeye_common/vfp/asm_vfp.h"
  #include "core/arm/skyeye_common/vfp/vfp.h"
@@ -1345,12 +1346,13 @@ index ad4db5f..f19214d 100644
 +#ifdef AZ_VFP_NATIVE
 +#include <cstdlib>
 +std::atomic<bool> VfpNative::enabled{std::getenv("AZ_VFP_SOFT") == nullptr};
++std::atomic<bool> VfpNative::predecoded{std::getenv("AZ_VFP_NO_PREDECODE") == nullptr};
 +#endif
  
  void VFPInit(ARMul_State* state) {
      state->VFP[VFP_FPSID] = VFP_FPSID_IMPLMEN << 24 | VFP_FPSID_SW << 23 | VFP_FPSID_SUBARCH << 16 |
 diff --git a/src/core/arm/skyeye_common/vfp/vfp.h b/src/core/arm/skyeye_common/vfp/vfp.h
-index 73561cd..da415c1 100644
+index 73561cd..1efaf52 100644
 --- a/src/core/arm/skyeye_common/vfp/vfp.h
 +++ b/src/core/arm/skyeye_common/vfp/vfp.h
 @@ -21,6 +21,7 @@
@@ -1361,7 +1363,7 @@ index 73561cd..da415c1 100644
  
  #define VFP_DEBUG_UNTESTED(x) LOG_TRACE(Core_ARM11, "in func {}, " #x " untested", __FUNCTION__);
  #define CHECK_VFP_ENABLED
-@@ -36,6 +37,27 @@ void vfp_raise_exceptions(ARMul_State* state, u32 exceptions, u32 inst, u32 fpsc
+@@ -36,6 +37,47 @@ void vfp_raise_exceptions(ARMul_State* state, u32 exceptions, u32 inst, u32 fpsc
  u32 vfp_single_cpdo(ARMul_State* state, u32 inst, u32 fpscr);
  u32 vfp_double_cpdo(ARMul_State* state, u32 inst, u32 fpscr);
  
@@ -1386,15 +1388,35 @@ index 73561cd..da415c1 100644
 +    vfp_raise_exceptions(cpu, ret, instr, fpscr);
 +}
 +
++#ifdef AZ_VFP_NATIVE
++// Same, with the operation decoded at translation time (VfpNative::Decode).
++inline void VfpCpdoOp(ARMul_State* cpu, u32 instr, bool dp, const VfpNative::Op& op) {
++    if (op.fn && cpu->vfp_window && VfpNative::predecoded.load(std::memory_order_relaxed) &&
++        (op.any_len || (cpu->VFP[VFP_FPSCR] & FPSCR_LENGTH_MASK) == 0)) {
++        if (!cpu->vfp_live)
++            VfpNative::Enter(cpu);
++        op.fn(cpu, op);
++        return;
++    }
++    VfpCpdo(cpu, instr, dp);
++}
++// For the instruction structs and handlers in vfpinstr.cpp.
++#define VFP_NATIVE_DECODE inst_cream->op = VfpNative::Decode(inst, inst_cream->dp_operation)
++#define VFP_CPDO VfpCpdoOp(cpu, inst_cream->instr, inst_cream->dp_operation, inst_cream->op)
++#else
++#define VFP_NATIVE_DECODE (void)0
++#define VFP_CPDO VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation)
++#endif
++
  void VMOVBRS(ARMul_State* state, u32 to_arm, u32 t, u32 n, u32* value);
  void VMOVBRRD(ARMul_State* state, u32 to_arm, u32 t, u32 t2, u32 n, u32* value1, u32* value2);
  void VMOVBRRSS(ARMul_State* state, u32 to_arm, u32 t, u32 t2, u32 n, u32* value1, u32* value2);
 diff --git a/src/core/arm/skyeye_common/vfp/vfp_native.h b/src/core/arm/skyeye_common/vfp/vfp_native.h
 new file mode 100644
-index 0000000..4b9e21d
+index 0000000..a150888
 --- /dev/null
 +++ b/src/core/arm/skyeye_common/vfp/vfp_native.h
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,602 @@
 +// Bifold: run VFP data-processing instructions on the host FPU (AArch64 only).
 +//
 +// The guest FPSCR's DN, FZ and RMode bits sit at the same positions as the host FPCR's, and its
@@ -1419,11 +1441,14 @@ index 0000000..4b9e21d
 +#include "core/arm/skyeye_common/armstate.h"
 +#include "core/arm/skyeye_common/vfp/asm_vfp.h"
 +#include "core/arm/skyeye_common/vfp/vfp_helper.h"
++#include "core/arm/skyeye_common/vfp/vfp_native_op.h"
 +
 +namespace VfpNative {
 +
 +// Cleared by AZ_VFP_SOFT=1 at startup, or at run time through az_debug_vfp_native().
 +extern std::atomic<bool> enabled;
++// Use the operands decoded at translation time (Op) instead of decoding each time (A/B switch).
++extern std::atomic<bool> predecoded;
 +
 +constexpr u32 MODE_MASK = 0x07C00000; // AHP, DN, FZ, RMode
 +constexpr u32 EXC_MASK = 0x9F;        // IDC, IXC, UFC, OFC, DZC, IOC
@@ -1855,14 +1880,204 @@ index 0000000..4b9e21d
 +
 +#undef AZ_FORCE_INLINE
 +
++
++// ---- Decoded at translation time ----------------------------------------------------------------
++// The interpreter keeps one Op per VFP data-processing instruction: a function for exactly that
++// operation and its register numbers, so running it skips the decoding in Single/Double.
++
++// Op and OpFn: vfp_native_op.h.
++
++template <u32 Idx>
++void ArithS(ARMul_State* s, const Op& o) {
++    float r;
++    Arith(Idx, GetS(s, o.d), GetS(s, o.n), GetS(s, o.m), r);
++    PutS(s, o.d, r);
++}
++template <u32 Idx>
++void ArithD(ARMul_State* s, const Op& o) {
++    double r;
++    Arith(Idx, GetD(s, o.d), GetD(s, o.n), GetD(s, o.m), r);
++    PutD(s, o.d, r);
++}
++inline void MovS(ARMul_State* s, const Op& o) {
++    s->ExtReg[o.d] = s->ExtReg[o.m];
++}
++inline void AbsS(ARMul_State* s, const Op& o) {
++    s->ExtReg[o.d] = s->ExtReg[o.m] & 0x7FFFFFFF;
++}
++inline void NegS(ARMul_State* s, const Op& o) {
++    s->ExtReg[o.d] = s->ExtReg[o.m] ^ 0x80000000;
++}
++inline void SqrtS(ARMul_State* s, const Op& o) {
++    PutS(s, o.d, Sqrt(GetS(s, o.m)));
++}
++inline void SqrtD(ARMul_State* s, const Op& o) {
++    PutD(s, o.d, Sqrt(GetD(s, o.m)));
++}
++template <typename T, bool E, bool Zero>
++void CmpOp(ARMul_State* s, const Op& o) {
++    u32 nzcv;
++    if constexpr (sizeof(T) == 4) {
++        nzcv = Zero ? CmpZero<E>(GetS(s, o.d)) : Cmp<E>(GetS(s, o.d), GetS(s, o.m));
++    } else {
++        nzcv = Zero ? CmpZero<E>(GetD(s, o.d)) : Cmp<E>(GetD(s, o.d), GetD(s, o.m));
++    }
++    s->VFP[VFP_FPSCR] = (s->VFP[VFP_FPSCR] & 0x0FFFFFFF) | (nzcv & 0xF0000000);
++}
++inline void CvtSD(ARMul_State* s, const Op& o) { // F64 <- F32
++    PutD(s, o.d, ToDouble(GetS(s, o.m)));
++}
++inline void CvtDS(ARMul_State* s, const Op& o) { // F32 <- F64
++    PutS(s, o.d, ToSingle(GetD(s, o.m)));
++}
++template <typename T, bool Signed>
++void FromIntOp(ARMul_State* s, const Op& o) {
++    const T r = FromInt<Signed, T>(s->ExtReg[o.m]);
++    if constexpr (sizeof(T) == 4)
++        PutS(s, o.d, r);
++    else
++        PutD(s, o.d, r);
++}
++template <typename T, bool Signed, bool TowardZero>
++void ToIntOp(ARMul_State* s, const Op& o) {
++    const u32 mode = TowardZero ? 3 : (s->VFP[VFP_FPSCR] >> 22) & 3;
++    if constexpr (sizeof(T) == 4)
++        s->ExtReg[o.d] = ToInt<Signed>(GetS(s, o.m), mode);
++    else
++        s->ExtReg[o.d] = ToInt<Signed>(GetD(s, o.m), mode);
++}
++
++// Same decoding as Single/Double, done once.
++inline Op Decode(u32 inst, bool dp) {
++    Op o;
++    if ((inst & FOP_MASK) != FOP_EXT) {
++        static constexpr OpFn single[9] = {ArithS<0>, ArithS<1>, ArithS<2>, ArithS<3>, ArithS<4>,
++                                           ArithS<5>, ArithS<6>, ArithS<7>, ArithS<8>};
++        static constexpr OpFn dbl[9] = {ArithD<0>, ArithD<1>, ArithD<2>, ArithD<3>, ArithD<4>,
++                                        ArithD<5>, ArithD<6>, ArithD<7>, ArithD<8>};
++        const u32 idx = FOP_TO_IDX(inst);
++        if (idx > 8)
++            return o;
++        o.fn = dp ? dbl[idx] : single[idx];
++        o.d = dp ? vfp_get_dd(inst) : vfp_get_sd(inst);
++        o.n = dp ? vfp_get_dn(inst) : vfp_get_sn(inst);
++        o.m = dp ? vfp_get_dm(inst) : vfp_get_sm(inst);
++        o.any_len = dp ? (o.d & 0x0c) == 0 : (o.d & 0x18) == 0;
++        return o;
++    }
++    const u32 idx = FEXT_TO_IDX(inst);
++    if (idx <= 3) { // VMOV, VABS, VNEG, VSQRT (vector-capable)
++        o.d = dp ? vfp_get_dd(inst) : vfp_get_sd(inst);
++        o.m = dp ? vfp_get_dm(inst) : vfp_get_sm(inst);
++        o.any_len = dp ? (o.d & 0x0c) == 0 : (o.d & 0x18) == 0;
++        if (dp)
++            o.fn = idx == 3 ? SqrtD : nullptr; // double VMOV/VABS/VNEG stay with VfpCpdo
++        else
++            o.fn = idx == 0 ? MovS : idx == 1 ? AbsS : idx == 2 ? NegS : SqrtS;
++        return o;
++    }
++    o.any_len = true;
++    switch (idx) {
++    case 8: case 9: case 10: case 11:
++        o.d = dp ? vfp_get_dd(inst) : vfp_get_sd(inst);
++        o.m = dp ? vfp_get_dm(inst) : vfp_get_sm(inst);
++        if (dp)
++            o.fn = idx == 8 ? CmpOp<double, false, false> : idx == 9 ? CmpOp<double, true, false>
++                 : idx == 10 ? CmpOp<double, false, true> : CmpOp<double, true, true>;
++        else
++            o.fn = idx == 8 ? CmpOp<float, false, false> : idx == 9 ? CmpOp<float, true, false>
++                 : idx == 10 ? CmpOp<float, false, true> : CmpOp<float, true, true>;
++        return o;
++    case 15:
++        o.d = dp ? vfp_get_sd(inst) : vfp_get_dd(inst);
++        o.m = dp ? vfp_get_dm(inst) : vfp_get_sm(inst);
++        o.fn = dp ? CvtDS : CvtSD;
++        return o;
++    case 16: case 17:
++        o.d = dp ? vfp_get_dd(inst) : vfp_get_sd(inst);
++        o.m = vfp_get_sm(inst);
++        if (dp)
++            o.fn = idx == 16 ? FromIntOp<double, false> : FromIntOp<double, true>;
++        else
++            o.fn = idx == 16 ? FromIntOp<float, false> : FromIntOp<float, true>;
++        return o;
++    case 24: case 25: case 26: case 27:
++        o.d = vfp_get_sd(inst);
++        o.m = dp ? vfp_get_dm(inst) : vfp_get_sm(inst);
++        if (dp)
++            o.fn = idx == 24 ? ToIntOp<double, false, false> : idx == 25 ? ToIntOp<double, false, true>
++                 : idx == 26 ? ToIntOp<double, true, false> : ToIntOp<double, true, true>;
++        else
++            o.fn = idx == 24 ? ToIntOp<float, false, false> : idx == 25 ? ToIntOp<float, false, true>
++                 : idx == 26 ? ToIntOp<float, true, false> : ToIntOp<float, true, true>;
++        return o;
++    default:
++        return o;
++    }
++}
++
 +} // namespace VfpNative
 +
 +#endif
+diff --git a/src/core/arm/skyeye_common/vfp/vfp_native_op.h b/src/core/arm/skyeye_common/vfp/vfp_native_op.h
+new file mode 100644
+index 0000000..0868d86
+--- /dev/null
++++ b/src/core/arm/skyeye_common/vfp/vfp_native_op.h
+@@ -0,0 +1,23 @@
++// Bifold: the per-instruction operation that vfp_native.h decodes at translation time. Kept
++// apart from vfp_native.h so the interpreter's instruction structs (arm_dyncom_trans.h) can hold
++// one without pulling in ARMul_State.
++#pragma once
++
++#include "common/common_types.h"
++
++struct ARMul_State;
++
++#if defined(__aarch64__)
++namespace VfpNative {
++struct Op;
++using OpFn = void (*)(ARMul_State*, const Op&);
++struct Op {
++    OpFn fn = nullptr; // nullptr: not handled here (VfpCpdo decides)
++    u8 d = 0, n = 0, m = 0;
++    bool any_len = false; // scalar whatever FPSCR.LEN says (comparisons, conversions, bank 0)
++};
++} // namespace VfpNative
++#define VFP_NATIVE_OP VfpNative::Op op;
++#else
++#define VFP_NATIVE_OP
++#endif
 diff --git a/src/core/arm/skyeye_common/vfp/vfpinstr.cpp b/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
-index a66dc10..37c88ae 100644
+index a66dc10..541e3f2 100644
 --- a/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
 +++ b/src/core/arm/skyeye_common/vfp/vfpinstr.cpp
-@@ -40,14 +40,7 @@ VMLA_INST : {
+@@ -5,6 +5,8 @@
+ /* Notice: this file should not be compiled as is, and is meant to be
+    included in other files only. */
+ 
++#include "core/arm/skyeye_common/vfp/vfp_native_op.h" // VFP_NATIVE_OP
++
+ /* ----------------------------------------------------------------------- */
+ /* CDP instructions */
+ /* cond 1110 opc1 CRn- CRd- copr op20 CRm- CDP */
+@@ -16,6 +18,7 @@
+ struct vmla_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -29,6 +32,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vmla)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -40,14 +44,7 @@ VMLA_INST : {
  
          vmla_inst* inst_cream = (vmla_inst*)inst_base->component;
  
@@ -1874,11 +2089,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vmla_inst));
-@@ -87,14 +80,7 @@ VMLS_INST : {
+@@ -63,6 +60,7 @@ VMLA_INST : {
+ struct vmls_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -76,6 +74,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vmls)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -87,14 +86,7 @@ VMLS_INST : {
  
          vmls_inst* inst_cream = (vmls_inst*)inst_base->component;
  
@@ -1890,11 +2121,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vmls_inst));
-@@ -134,14 +120,7 @@ VNMLA_INST : {
+@@ -110,6 +102,7 @@ VMLS_INST : {
+ struct vnmla_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -123,6 +116,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vnmla)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -134,14 +128,7 @@ VNMLA_INST : {
  
          vnmla_inst* inst_cream = (vnmla_inst*)inst_base->component;
  
@@ -1906,11 +2153,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vnmla_inst));
-@@ -182,14 +161,7 @@ VNMLS_INST : {
+@@ -158,6 +145,7 @@ VNMLA_INST : {
+ struct vnmls_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -171,6 +159,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vnmls)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -182,14 +171,7 @@ VNMLS_INST : {
  
          vnmls_inst* inst_cream = (vnmls_inst*)inst_base->component;
  
@@ -1922,11 +2185,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vnmls_inst));
-@@ -229,14 +201,7 @@ VNMUL_INST : {
+@@ -205,6 +187,7 @@ VNMLS_INST : {
+ struct vnmul_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -218,6 +201,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vnmul)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -229,14 +213,7 @@ VNMUL_INST : {
  
          vnmul_inst* inst_cream = (vnmul_inst*)inst_base->component;
  
@@ -1938,11 +2217,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vnmul_inst));
-@@ -276,14 +241,7 @@ VMUL_INST : {
+@@ -252,6 +229,7 @@ VNMUL_INST : {
+ struct vmul_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -265,6 +243,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vmul)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -276,14 +255,7 @@ VMUL_INST : {
  
          vmul_inst* inst_cream = (vmul_inst*)inst_base->component;
  
@@ -1954,11 +2249,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vmul_inst));
-@@ -323,14 +281,7 @@ VADD_INST : {
+@@ -299,6 +271,7 @@ VMUL_INST : {
+ struct vadd_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -312,6 +285,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vadd)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -323,14 +297,7 @@ VADD_INST : {
  
          vadd_inst* inst_cream = (vadd_inst*)inst_base->component;
  
@@ -1970,11 +2281,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vadd_inst));
-@@ -370,14 +321,7 @@ VSUB_INST : {
+@@ -346,6 +313,7 @@ VADD_INST : {
+ struct vsub_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -359,6 +327,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vsub)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -370,14 +339,7 @@ VSUB_INST : {
  
          vsub_inst* inst_cream = (vsub_inst*)inst_base->component;
  
@@ -1986,11 +2313,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vsub_inst));
-@@ -417,14 +361,7 @@ VDIV_INST : {
+@@ -393,6 +355,7 @@ VSUB_INST : {
+ struct vdiv_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -406,6 +369,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vdiv)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -417,14 +381,7 @@ VDIV_INST : {
  
          vdiv_inst* inst_cream = (vdiv_inst*)inst_base->component;
  
@@ -2002,11 +2345,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vdiv_inst));
-@@ -557,14 +494,7 @@ VABS_INST : {
+@@ -533,6 +490,7 @@ VMOVR_INST : {
+ typedef struct _vabs_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ } vabs_inst;
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -546,6 +504,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vabs)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -557,14 +516,7 @@ VABS_INST : {
  
          vabs_inst* inst_cream = (vabs_inst*)inst_base->component;
  
@@ -2018,11 +2377,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vabs_inst));
-@@ -605,14 +535,7 @@ VNEG_INST : {
+@@ -581,6 +533,7 @@ VABS_INST : {
+ struct vneg_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -594,6 +547,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vneg)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -605,14 +559,7 @@ VNEG_INST : {
  
          vneg_inst* inst_cream = (vneg_inst*)inst_base->component;
  
@@ -2034,11 +2409,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vneg_inst));
-@@ -652,14 +575,7 @@ VSQRT_INST : {
+@@ -628,6 +575,7 @@ VNEG_INST : {
+ struct vsqrt_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -641,6 +589,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vsqrt)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -652,14 +601,7 @@ VSQRT_INST : {
  
          vsqrt_inst* inst_cream = (vsqrt_inst*)inst_base->component;
  
@@ -2050,11 +2441,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vsqrt_inst));
-@@ -699,14 +615,7 @@ VCMP_INST : {
+@@ -675,6 +617,7 @@ VSQRT_INST : {
+ struct vcmp_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -688,6 +631,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vcmp)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -699,14 +643,7 @@ VCMP_INST : {
  
          vcmp_inst* inst_cream = (vcmp_inst*)inst_base->component;
  
@@ -2066,11 +2473,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vcmp_inst));
-@@ -746,14 +655,7 @@ VCMP2_INST : {
+@@ -722,6 +659,7 @@ VCMP_INST : {
+ struct vcmp2_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -735,6 +673,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vcmp2)(unsigned int inst, int index) {
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -746,14 +685,7 @@ VCMP2_INST : {
  
          vcmp2_inst* inst_cream = (vcmp2_inst*)inst_base->component;
  
@@ -2082,11 +2505,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vcmp2_inst));
-@@ -793,14 +695,7 @@ VCVTBDS_INST : {
+@@ -769,6 +701,7 @@ VCMP2_INST : {
+ struct vcvtbds_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -782,6 +715,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vcvtbds)(unsigned int inst, int index)
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -793,14 +727,7 @@ VCVTBDS_INST : {
  
          vcvtbds_inst* inst_cream = (vcvtbds_inst*)inst_base->component;
  
@@ -2098,11 +2537,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vcvtbds_inst));
-@@ -842,14 +737,7 @@ VCVTBFF_INST : {
+@@ -816,6 +743,7 @@ VCVTBDS_INST : {
+ struct vcvtbff_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -831,6 +759,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vcvtbff)(unsigned int inst, int index)
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -842,14 +771,7 @@ VCVTBFF_INST : {
  
          vcvtbff_inst* inst_cream = (vcvtbff_inst*)inst_base->component;
  
@@ -2114,11 +2569,27 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vcvtbff_inst));
-@@ -889,14 +777,7 @@ VCVTBFI_INST : {
+@@ -865,6 +787,7 @@ VCVTBFF_INST : {
+ struct vcvtbfi_inst {
+     unsigned int instr;
+     unsigned int dp_operation;
++    VFP_NATIVE_OP
+ };
+ #endif
+ #ifdef VFP_INTERPRETER_TRANS
+@@ -878,6 +801,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(vcvtbfi)(unsigned int inst, int index)
+ 
+     inst_cream->dp_operation = BIT(inst, 8);
+     inst_cream->instr = inst;
++    VFP_NATIVE_DECODE;
+ 
+     return inst_base;
+ }
+@@ -889,14 +813,7 @@ VCVTBFI_INST : {
  
          vcvtbfi_inst* inst_cream = (vcvtbfi_inst*)inst_base->component;
  
@@ -2130,11 +2601,11 @@ index a66dc10..37c88ae 100644
 -            ret = vfp_single_cpdo(cpu, inst_cream->instr, cpu->VFP[VFP_FPSCR]);
 -
 -        CHECK_VFP_CDP_RET;
-+        VfpCpdo(cpu, inst_cream->instr, inst_cream->dp_operation);
++        VFP_CPDO;
      }
      cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(vcvtbfi_inst));
-@@ -993,6 +874,10 @@ VMSR_INST : {
+@@ -993,6 +910,10 @@ VMSR_INST : {
  
          if (reg == 1) {
              cpu->VFP[VFP_FPSCR] = cpu->Reg[rt];
@@ -2145,7 +2616,7 @@ index a66dc10..37c88ae 100644
          } else if (cpu->InAPrivilegedMode()) {
              if (reg == 8)
                  cpu->VFP[VFP_FPEXC] = cpu->Reg[rt];
-@@ -1096,6 +981,10 @@ VMRS_INST : {
+@@ -1096,6 +1017,10 @@ VMRS_INST : {
          if (reg == 1) // FPSCR
          {
              if (rt != 15) {

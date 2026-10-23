@@ -198,8 +198,9 @@ int az_debug_profile(const char* path, int seconds, int hz);
 /// Debug: in a build instrumented with -fprofile-instr-generate, writes the profile counters to
 /// `path` (for PGO). Returns 0 on success, -1 when the build is not instrumented.
 int az_debug_write_pgo_profile(const char* path);
-/// Debug: whether the interpreter runs VFP arithmetic on the host FPU (1) or in software (0);
-/// `set` 0 or 1 changes it, -1 only reads it. Returns -1 where the host FPU path does not exist.
+/// Debug: how the interpreter runs VFP arithmetic: 0 in software, 1 on the host FPU decoding
+/// each time, 2 on the host FPU decoded at translation (default). `set` 0–2 changes it, -1 only
+/// reads it. Returns -1 where the host FPU path does not exist.
 int az_debug_vfp_native(int set);
 
 // ---- Software renderer presentation ------------------------------------------------------------

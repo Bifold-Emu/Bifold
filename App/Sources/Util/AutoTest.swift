@@ -347,7 +347,7 @@ enum RemotePlay {
                 let rc = az_debug_write_pgo_profile(dir.appendingPathComponent("interp.profraw").path)
                 log("pgo rc=\(rc)")
             case "vfp":
-                // vfp 0|1: VFP arithmetic in software / on the host FPU (for in-process A/B runs).
+                // vfp 0|1|2: VFP arithmetic in software / host FPU / host FPU pre-decoded (A/B runs).
                 log("vfp \(az_debug_vfp_native(Int32(n(1, 1))))")
             case "prof":
                 // prof seconds hz: sample the emulation thread's stack into remote/prof.txt.
