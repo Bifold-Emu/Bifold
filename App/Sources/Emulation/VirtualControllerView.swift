@@ -216,19 +216,27 @@ final class VirtualControllerView: UIView {
         }
 
         if landscape {
-            // Controls hug the left and right edges, over the sides of the screens.
-            let leftX = b.minX + margin, rightX = b.maxX - margin
-            place(.circlePad, CGRect(x: leftX, y: b.midY - pad - margin * 0.5, width: pad, height: pad))
-            place(.dpad, CGRect(x: leftX + pad * 0.1, y: b.midY + margin * 0.5, width: pad * 0.8, height: pad * 0.8))
-            faceButtons(cx: rightX - face * 1.55, cy: b.midY - face * 0.6)
-            place(.button(AZ_BUTTON_L), CGRect(x: leftX, y: b.minY + margin, width: shoulderW, height: shoulderH))
-            place(.button(AZ_BUTTON_ZL), CGRect(x: leftX + shoulderW + margin, y: b.minY + margin, width: shoulderW * 0.8, height: shoulderH))
+            // Controls hug the left and right edges, over the sides of the screens. The left
+            // group (circle pad above d-pad) sits low, where the thumb rests, but stays inside
+            // the safe area: in landscape the Dynamic Island occupies the side inset.
+            let leftX = b.minX + margin * 0.3 + unit * 0.4 - 8, rightX = b.maxX - margin
+            let lowY = bounds.maxY - max(safeAreaInsets.bottom * 0.5, margin * 0.5)
+            let stick = pad * 0.78, dpadSize = pad * 0.72
+            // Both thumb groups are centred vertically on the screen.
+            let gap = margin * 1.2
+            let stickY = bounds.midY - (stick + gap + dpadSize) / 2
+            place(.circlePad, CGRect(x: leftX, y: stickY, width: stick, height: stick))
+            place(.dpad, CGRect(x: leftX + (stick - dpadSize) / 2, y: stickY + stick + gap, width: dpadSize, height: dpadSize))
+            faceButtons(cx: rightX - face * 1.55 + unit * 0.3 + 8, cy: bounds.midY)
+            let shoulderLeftX = b.minX + margin * 0.3
+            place(.button(AZ_BUTTON_L), CGRect(x: shoulderLeftX, y: b.minY + margin, width: shoulderW, height: shoulderH))
+            place(.button(AZ_BUTTON_ZL), CGRect(x: shoulderLeftX + shoulderW + margin, y: b.minY + margin, width: shoulderW * 0.8, height: shoulderH))
             place(.button(AZ_BUTTON_R), CGRect(x: rightX - shoulderW, y: b.minY + margin, width: shoulderW, height: shoulderH))
             place(.button(AZ_BUTTON_ZR), CGRect(x: rightX - shoulderW * 1.8 - margin, y: b.minY + margin, width: shoulderW * 0.8, height: shoulderH))
             let smallW = unit * 1.25, smallH = unit * 0.5
-            place(.button(AZ_BUTTON_SELECT), CGRect(x: rightX - smallW * 2 - margin, y: b.maxY - smallH - margin, width: smallW, height: smallH))
-            place(.button(AZ_BUTTON_START), CGRect(x: rightX - smallW, y: b.maxY - smallH - margin, width: smallW, height: smallH))
-            place(.button(AZ_BUTTON_HOME), CGRect(x: leftX + pad + margin, y: b.maxY - smallH * 1.4 - margin, width: smallH * 1.4, height: smallH * 1.4))
+            place(.button(AZ_BUTTON_SELECT), CGRect(x: rightX - smallW * 2 - margin, y: lowY - smallH, width: smallW, height: smallH))
+            place(.button(AZ_BUTTON_START), CGRect(x: rightX - smallW, y: lowY - smallH, width: smallW, height: smallH))
+            place(.button(AZ_BUTTON_HOME), CGRect(x: leftX + stick + margin + unit * 0.6 - 22, y: lowY - smallH * 1.4, width: smallH * 1.4, height: smallH * 1.4))
         } else {
             // Portrait: screens fill the top (PortraitTopFullWidth), controls use the bottom.
             let fallbackTop = b.maxY - min(max(bounds.height * 0.36, 260), 360)
