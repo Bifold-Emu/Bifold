@@ -156,6 +156,18 @@ typedef struct {
 } AZPerfStats;
 bool az_get_perf_stats(AZPerfStats* out);
 
+/// A visible stall (> 100 ms). kind: 0 = no emulated frame (emulation stopped),
+/// 1 = the game showed no newly drawn picture (it swapped without drawing),
+/// 2 = nothing reached the display (presentation stalled).
+typedef struct {
+    double at_s;   ///< seconds since the session started
+    double gap_ms; ///< length of the stall
+    int kind;
+} AZHitch;
+/// Copies stalls recorded after *cursor (at most max; the newest 256 are kept) and advances
+/// *cursor. Start with *cursor = 0. Pauses are not counted.
+int az_get_hitches(uint64_t* cursor, AZHitch* out, int max);
+
 /// Temporary speed override (fast-forward). 0 disables the override.
 void az_set_speed_override(double percent);
 

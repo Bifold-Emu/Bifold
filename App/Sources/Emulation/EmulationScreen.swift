@@ -13,6 +13,7 @@ struct EmulationScreen: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var input = InputManager.shared
     @ObservedObject private var mp = MultiplayerManager.shared
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     @State private var showMenu = false
     @State private var showMultiplayer = false
@@ -129,49 +130,67 @@ struct EmulationScreen: View {
 
     // MARK: Status bar
 
+    /// Portrait: pause button on the left, readouts on the right. Landscape: the shoulder
+    /// buttons sit in both top corners, so everything is grouped in the middle between them.
     private var statusBar: some View {
         HStack(spacing: 8) {
-            Button { openMenu() } label: {
-                Image(systemName: "pause.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .frame(width: 34, height: 34)
-                    .background(.black.opacity(0.5), in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.15)))
-            }
-            .accessibilityLabel("暂停")
-            if core.isFastForward {
-                pill { Image(systemName: "forward.fill"); Text("\(settings.fastForwardSpeed)%") }
-            }
-            if mp.state != AZ_MP_STATE_IDLE {
-                pill { Image(systemName: "person.2.wave.2.fill"); Text(mp.roomName.isEmpty ? "联机中" : mp.roomName).lineLimit(1) }
-            }
-            Spacer()
-            if core.state == .running {
-                switch settings.perfOverlay {
-                case .off:
-                    if showSlowHint {
-                        pill {
-                            StatusLight(color: .orange)
-                            Text(slowHintText)
-                        }
-                        .transition(.opacity)
-                    }
-                case .fps:
-                    pill { Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit() }
-                case .detailed:
-                    pill {
-                        StatusLight(color: JITHelper.isEnabled ? Theme.led : .orange)
-                        Text(JITHelper.isEnabled ? "JIT" : "无 JIT")
-                        Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit()
-                        Text(String(format: "速度 %.0f%%", core.perf.emulation_speed * 100)).monospacedDigit()
-                        Text(String(format: "%.1f ms", core.perf.frametime_ms)).monospacedDigit()
-                    }
-                }
-            }
+            if isLandscape { Spacer(minLength: 0) }
+            pauseButton
+            statusPills
+            if !isLandscape { Spacer() }
+            perfReadout
+            if isLandscape { Spacer(minLength: 0) }
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 12)
         .padding(.top, 4)
+    }
+
+    private var isLandscape: Bool { verticalSizeClass == .compact }
+
+    private var pauseButton: some View {
+        Button { openMenu() } label: {
+            Image(systemName: "pause.fill")
+                .font(.system(size: 13, weight: .bold))
+                .frame(width: 34, height: 34)
+                .background(.black.opacity(0.5), in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.15)))
+        }
+        .accessibilityLabel("暂停")
+    }
+
+    @ViewBuilder private var statusPills: some View {
+        if core.isFastForward {
+            pill { Image(systemName: "forward.fill"); Text("\(settings.fastForwardSpeed)%") }
+        }
+        if mp.state != AZ_MP_STATE_IDLE {
+            pill { Image(systemName: "person.2.wave.2.fill"); Text(mp.roomName.isEmpty ? "联机中" : mp.roomName).lineLimit(1) }
+        }
+    }
+
+    @ViewBuilder private var perfReadout: some View {
+        if core.state == .running {
+            switch settings.perfOverlay {
+            case .off:
+                if showSlowHint {
+                    pill {
+                        StatusLight(color: .orange)
+                        Text(slowHintText)
+                    }
+                    .transition(.opacity)
+                }
+            case .fps:
+                pill { Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit() }
+            case .detailed:
+                pill {
+                    StatusLight(color: JITHelper.isEnabled ? Theme.led : .orange)
+                    Text(JITHelper.isEnabled ? "JIT" : "无 JIT")
+                    Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit()
+                    Text(String(format: "速度 %.0f%%", core.perf.emulation_speed * 100)).monospacedDigit()
+                    Text(String(format: "%.1f ms", core.perf.frametime_ms)).monospacedDigit()
+                }
+            }
+        }
     }
 
     private func pill<C: View>(@ViewBuilder _ content: () -> C) -> some View {

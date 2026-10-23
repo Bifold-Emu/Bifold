@@ -23,6 +23,9 @@ namespace AzIOS {
 /// Copies a std::string into a malloc'd C string (released with az_free).
 char* DupString(const std::string& s);
 
+/// Records the host time of an emulated frame; gaps above 100 ms are kept as stalls.
+void NoteFrame();
+
 // ----- window ----------------------------------------------------------------------------------
 /// EmuWindow backed by a CAMetalLayer (Vulkan via MoltenVK). On non-Apple hosts (unit tests)
 /// it becomes a headless window so the software renderer can run.
@@ -39,7 +42,8 @@ public:
         return window_info.render_surface != nullptr;
     }
 
-    void PollEvents() override {}
+    /// Called by the renderer once per emulated frame (RendererBase::EndFrame).
+    void PollEvents() override;
     void MakeCurrent() override {}
     void DoneCurrent() override {}
     std::unique_ptr<Frontend::GraphicsContext> CreateSharedContext() const override;

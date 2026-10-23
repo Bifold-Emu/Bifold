@@ -158,6 +158,61 @@ void CaptureSoftwareFrame() {
     ++st.frame_counter;
 }
 
+// --- Stall tracking ------------------------------------------------------------------------
+// Three clocks: emulated frames (EndFrame), top-screen swaps that carry new draws, and frames
+// reaching the display. A gap above 100 ms on any of them is something the player can see.
+struct HitchLog {
+    std::mutex mutex;
+    std::array<AZHitch, 256> ring{};
+    uint64_t count = 0; // total recorded; ring holds the newest 256
+    std::chrono::steady_clock::time_point session_start{};
+    std::array<std::chrono::steady_clock::time_point, 3> last{};
+    std::array<bool, 3> have_last{};
+    uint64_t last_draws = 0;
+};
+HitchLog& Hitches() {
+    static HitchLog log;
+    return log;
+}
+void ResetFrameClock(bool new_session) {
+    auto& h = Hitches();
+    std::scoped_lock lock{h.mutex};
+    h.have_last = {};
+    if (new_session) {
+        h.session_start = std::chrono::steady_clock::now();
+    }
+}
+void NoteTick(int kind) {
+    auto& h = Hitches();
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock{h.mutex};
+    if (h.have_last[kind]) {
+        const double gap_ms =
+            std::chrono::duration<double, std::milli>(now - h.last[kind]).count();
+        if (gap_ms > 100.0) {
+            h.ring[h.count % h.ring.size()] = {
+                std::chrono::duration<double>(now - h.session_start).count(), gap_ms, kind};
+            ++h.count;
+        }
+    }
+    h.last[kind] = now;
+    h.have_last[kind] = true;
+}
+void OnTopSwap(u64 draws) {
+    auto& h = Hitches();
+    {
+        std::scoped_lock lock{h.mutex};
+        if (draws == h.last_draws) {
+            return; // swapped without drawing anything new
+        }
+        h.last_draws = draws;
+    }
+    NoteTick(1);
+}
+void OnPresent() {
+    NoteTick(2);
+}
+
 void WaitWhilePaused() {
     auto& st = GetState();
     // Mute while paused so no audio bleeds out.
@@ -166,6 +221,7 @@ void WaitWhilePaused() {
     std::unique_lock lock{st.pause_mutex};
     st.pause_cv.wait(lock, [&] { return !st.paused || st.stop_requested; });
     Settings::values.volume = volume;
+    ResetFrameClock(false);
 }
 
 /// Applies the latest surface/layout to the window. Caller holds surface_mutex.
@@ -218,6 +274,10 @@ void ApplyPendingSurfaceFromEmuThread() {
 }
 
 } // namespace
+
+void NoteFrame() {
+    NoteTick(0);
+}
 } // namespace AzIOS
 
 using namespace AzIOS;
@@ -609,6 +669,9 @@ AZResult az_run_game(const char* path) {
     st.software_renderer =
         Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Software;
     st.frame_counter = 0;
+    ResetFrameClock(true);
+    VideoCore::debug_top_swap_hook = &OnTopSwap;
+    VideoCore::debug_present_hook = &OnPresent;
     system.GPU().ApplyPerProgramSettings(program_id);
     if (loading_cb) {
         loading_cb(0, 0, 0, loading_ctx);
@@ -750,6 +813,24 @@ bool az_get_perf_stats(AZPerfStats* out) {
     out->emulation_speed = r.emulation_speed;
     out->frametime_ms = r.system_fps > 0.0 ? 1000.0 / r.system_fps : 0.0;
     return true;
+}
+
+int az_get_hitches(uint64_t* cursor, AZHitch* out, int max) {
+    if (!cursor || !out || max <= 0) {
+        return 0;
+    }
+    auto& h = AzIOS::Hitches();
+    std::scoped_lock lock{h.mutex};
+    uint64_t from = *cursor;
+    if (h.count > h.ring.size() && from < h.count - h.ring.size()) {
+        from = h.count - h.ring.size();
+    }
+    int n = 0;
+    for (; from < h.count && n < max; ++from, ++n) {
+        out[n] = h.ring[from % h.ring.size()];
+    }
+    *cursor = from;
+    return n;
 }
 
 void az_set_speed_override(double percent) {

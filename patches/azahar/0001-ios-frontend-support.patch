@@ -331,6 +331,295 @@ index 7453326..276183c 100644
  
      // Multi-process state
      config.processor_id = GetID();
+diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
+index d1a6c38..b918f7b 100644
+--- a/src/core/arm/dyncom/arm_dyncom.cpp
++++ b/src/core/arm/dyncom/arm_dyncom.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <cstdlib>
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
+@@ -19,6 +20,8 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
+                        std::shared_ptr<Core::Timing::Timer> timer)
+     : ARM_Interface(id, timer), system(system_) {
+     state = std::make_unique<ARMul_State>(system, memory, initial_mode);
++    state->fast_block_lookup = std::getenv("AZ_SLOW_BLOCK") == nullptr;
++    state->fast_memory = std::getenv("AZ_SLOW_MEM") == nullptr;
+ }
+ 
+ ARM_DynCom::~ARM_DynCom() {}
+@@ -38,7 +41,7 @@ void ARM_DynCom::Step() {
+ }
+ 
+ void ARM_DynCom::ClearInstructionCache() {
+-    state->instruction_cache.clear();
++    state->ClearBlockCache();
+     trans_cache_buf_top = 0;
+ }
+ 
+diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
+index 781ff3d..f3c8f77 100644
+--- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
++++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
+@@ -1646,15 +1646,29 @@ DISPATCH: {
+         cpu->Reg[15] &= 0xfffffffc;
+ 
+     // Find the cached instruction cream, otherwise translate it...
+-    auto itr = cpu->instruction_cache.find(cpu->Reg[15]);
+-    if (itr != cpu->instruction_cache.end()) {
+-        ptr = itr->second;
+-    } else if (cpu->NumInstrsToExecute != 1) {
+-        if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+-            goto END;
+-    } else {
+-        if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+-            goto END;
++    {
++        const u32 pc = cpu->Reg[15];
++        auto& fast = cpu->fast_block_cache[(pc >> 1) & (cpu->fast_block_cache.size() - 1)];
++        if (fast.pc == pc && fast.generation == cpu->block_cache_generation &&
++            cpu->fast_block_lookup) [[likely]] {
++            ptr = fast.ptr;
++        } else {
++            auto itr = cpu->instruction_cache.find(pc);
++            if (itr != cpu->instruction_cache.end()) {
++                ptr = itr->second;
++            } else if (cpu->NumInstrsToExecute != 1) {
++                if (InterpreterTranslateBlock(cpu, ptr, pc) == FETCH_EXCEPTION)
++                    goto END;
++            } else {
++                if (InterpreterTranslateSingle(cpu, ptr, pc) == FETCH_EXCEPTION)
++                    goto END;
++            }
++            // Single-step translations are not shared with normal execution: they end after
++            // one instruction, so only blocks found in or added to the map are cached here.
++            if (cpu->NumInstrsToExecute != 1) {
++                fast = {pc, cpu->block_cache_generation, ptr};
++            }
++        }
+     }
+ 
+ #ifdef ENABLE_GDBSTUB
+diff --git a/src/core/arm/skyeye_common/armstate.cpp b/src/core/arm/skyeye_common/armstate.cpp
+index 55abdf1..71ece32 100644
+--- a/src/core/arm/skyeye_common/armstate.cpp
++++ b/src/core/arm/skyeye_common/armstate.cpp
+@@ -191,11 +191,11 @@ void ARMul_State::ResetMPCoreCP15Registers() {
+     CP15[CP15_TLB_DEBUG_CONTROL] = 0x00000000;
+ }
+ 
+-u8 ARMul_State::ReadMemory8(u32 address) const {
++u8 ARMul_State::ReadMemory8Slow(u32 address) const {
+     return memory.Read8(address);
+ }
+ 
+-u16 ARMul_State::ReadMemory16(u32 address) const {
++u16 ARMul_State::ReadMemory16Slow(u32 address) const {
+     u16 data = memory.Read16(address);
+ 
+     if (InBigEndianMode())
+@@ -204,7 +204,7 @@ u16 ARMul_State::ReadMemory16(u32 address) const {
+     return data;
+ }
+ 
+-u32 ARMul_State::ReadMemory32(u32 address) const {
++u32 ARMul_State::ReadMemory32Slow(u32 address) const {
+     u32 data = memory.Read32(address);
+ 
+     if (InBigEndianMode())
+@@ -213,7 +213,7 @@ u32 ARMul_State::ReadMemory32(u32 address) const {
+     return data;
+ }
+ 
+-u64 ARMul_State::ReadMemory64(u32 address) const {
++u64 ARMul_State::ReadMemory64Slow(u32 address) const {
+     u64 data = memory.Read64(address);
+ 
+     if (InBigEndianMode())
+@@ -222,25 +222,25 @@ u64 ARMul_State::ReadMemory64(u32 address) const {
+     return data;
+ }
+ 
+-void ARMul_State::WriteMemory8(u32 address, u8 data) {
++void ARMul_State::WriteMemory8Slow(u32 address, u8 data) {
+     memory.Write8(address, data);
+ }
+ 
+-void ARMul_State::WriteMemory16(u32 address, u16 data) {
++void ARMul_State::WriteMemory16Slow(u32 address, u16 data) {
+     if (InBigEndianMode())
+         data = Common::swap16(data);
+ 
+     memory.Write16(address, data);
+ }
+ 
+-void ARMul_State::WriteMemory32(u32 address, u32 data) {
++void ARMul_State::WriteMemory32Slow(u32 address, u32 data) {
+     if (InBigEndianMode())
+         data = Common::swap32(data);
+ 
+     memory.Write32(address, data);
+ }
+ 
+-void ARMul_State::WriteMemory64(u32 address, u64 data) {
++void ARMul_State::WriteMemory64Slow(u32 address, u64 data) {
+     if (InBigEndianMode())
+         data = Common::swap64(data);
+ 
+diff --git a/src/core/arm/skyeye_common/armstate.h b/src/core/arm/skyeye_common/armstate.h
+index 676fd29..fc490e3 100644
+--- a/src/core/arm/skyeye_common/armstate.h
++++ b/src/core/arm/skyeye_common/armstate.h
+@@ -22,8 +22,11 @@
+ #pragma once
+ 
+ #include <array>
++#include <cstring>
+ #include <unordered_map>
+ #include "common/common_types.h"
++#include "common/swap.h"
++#include "core/memory.h"
+ #include "core/arm/skyeye_common/arm_regformat.h"
+ #ifdef ENABLE_GDBSTUB
+ #include "core/gdbstub/gdbstub.h"
+@@ -161,14 +164,79 @@ public:
+ 
+     // Reads/writes data in big/little endian format based on the
+     // state of the E (endian) bit in the APSR.
+-    u8 ReadMemory8(u32 address) const;
+-    u16 ReadMemory16(u32 address) const;
+-    u32 ReadMemory32(u32 address) const;
+-    u64 ReadMemory64(u32 address) const;
+-    void WriteMemory8(u32 address, u8 data);
+-    void WriteMemory16(u32 address, u16 data);
+-    void WriteMemory32(u32 address, u32 data);
+-    void WriteMemory64(u32 address, u64 data);
++    // Plain memory is read and written inline; MMIO, rasterizer-cached and unmapped pages fall
++    // back to MemorySystem (the *Slow functions).
++    u8 ReadMemory8(u32 address) const {
++        if (const u8* p = FastPage(address)) [[likely]]
++            return p[address & PAGE_OFFSET_MASK];
++        return ReadMemory8Slow(address);
++    }
++    u16 ReadMemory16(u32 address) const {
++        if (const u8* p = FastPage(address)) [[likely]] {
++            u16 v;
++            std::memcpy(&v, p + (address & PAGE_OFFSET_MASK), sizeof(v));
++            return InBigEndianMode() ? Common::swap16(v) : v;
++        }
++        return ReadMemory16Slow(address);
++    }
++    u32 ReadMemory32(u32 address) const {
++        if (const u8* p = FastPage(address)) [[likely]] {
++            u32 v;
++            std::memcpy(&v, p + (address & PAGE_OFFSET_MASK), sizeof(v));
++            return InBigEndianMode() ? Common::swap32(v) : v;
++        }
++        return ReadMemory32Slow(address);
++    }
++    u64 ReadMemory64(u32 address) const {
++        if (const u8* p = FastPage(address)) [[likely]] {
++            u64 v;
++            std::memcpy(&v, p + (address & PAGE_OFFSET_MASK), sizeof(v));
++            return InBigEndianMode() ? Common::swap64(v) : v;
++        }
++        return ReadMemory64Slow(address);
++    }
++    void WriteMemory8(u32 address, u8 data) {
++        if (u8* p = FastPage(address)) [[likely]] {
++            p[address & PAGE_OFFSET_MASK] = data;
++            return;
++        }
++        WriteMemory8Slow(address, data);
++    }
++    void WriteMemory16(u32 address, u16 data) {
++        if (u8* p = FastPage(address)) [[likely]] {
++            if (InBigEndianMode())
++                data = Common::swap16(data);
++            std::memcpy(p + (address & PAGE_OFFSET_MASK), &data, sizeof(data));
++            return;
++        }
++        WriteMemory16Slow(address, data);
++    }
++    void WriteMemory32(u32 address, u32 data) {
++        if (u8* p = FastPage(address)) [[likely]] {
++            if (InBigEndianMode())
++                data = Common::swap32(data);
++            std::memcpy(p + (address & PAGE_OFFSET_MASK), &data, sizeof(data));
++            return;
++        }
++        WriteMemory32Slow(address, data);
++    }
++    void WriteMemory64(u32 address, u64 data) {
++        if (u8* p = FastPage(address)) [[likely]] {
++            if (InBigEndianMode())
++                data = Common::swap64(data);
++            std::memcpy(p + (address & PAGE_OFFSET_MASK), &data, sizeof(data));
++            return;
++        }
++        WriteMemory64Slow(address, data);
++    }
++    u8 ReadMemory8Slow(u32 address) const;
++    u16 ReadMemory16Slow(u32 address) const;
++    u32 ReadMemory32Slow(u32 address) const;
++    u64 ReadMemory64Slow(u32 address) const;
++    void WriteMemory8Slow(u32 address, u8 data);
++    void WriteMemory16Slow(u32 address, u16 data);
++    void WriteMemory32Slow(u32 address, u32 data);
++    void WriteMemory64Slow(u32 address, u64 data);
+ 
+     u32 ReadCP15Register(u32 crn, u32 opcode_1, u32 crm, u32 opcode_2) const;
+     void WriteCP15Register(u32 value, u32 crn, u32 opcode_1, u32 crm, u32 opcode_2);
+@@ -217,6 +285,14 @@ public:
+     Core::System& system;
+     Memory::MemorySystem& memory;
+ 
++    static constexpr u32 PAGE_BITS = 12;
++    static constexpr u32 PAGE_OFFSET_MASK = (1u << PAGE_BITS) - 1;
++    /// Host pointer of the page holding `address` if it is plain memory, else null.
++    u8* FastPage(u32 address) const {
++        u8* const* pages = fast_memory ? memory.CurrentPagePointers() : nullptr;
++        return pages ? pages[address >> PAGE_BITS] : nullptr;
++    }
++
+     std::array<u32, 16> Reg{}; // The current register file
+     std::array<u32, 2> Reg_usr{};
+     std::array<u32, 2> Reg_svc{};   // R13_SVC R14_SVC
+@@ -264,6 +340,30 @@ public:
+     // process for our purposes), not per ARMul_State (which tracks CPU core state).
+     std::unordered_map<u32, std::size_t> instruction_cache;
+ 
++    // Direct-mapped front for instruction_cache: the interpreter looks a block up at every
++    // branch, and the hash map lookup is a measurable share of the time without a JIT.
++    // An entry is valid only while its generation matches block_cache_generation, so clearing
++    // the cache is O(1).
++    struct FastBlockEntry {
++        u32 pc;
++        u32 generation;
++        std::size_t ptr;
++    };
++    static constexpr std::size_t FAST_BLOCK_CACHE_BITS = 13;
++    std::array<FastBlockEntry, std::size_t{1} << FAST_BLOCK_CACHE_BITS> fast_block_cache{};
++    u32 block_cache_generation = 1;
++    // A/B switches for measuring the interpreter fast paths (env AZ_SLOW_BLOCK / AZ_SLOW_MEM).
++    bool fast_block_lookup = true;
++    bool fast_memory = true;
++
++    void ClearBlockCache() {
++        instruction_cache.clear();
++        if (++block_cache_generation == 0) {
++            fast_block_cache.fill({});
++            block_cache_generation = 1;
++        }
++    }
++
+ private:
+     void ResetMPCoreCP15Registers();
+ 
 diff --git a/src/core/file_sys/archive_extsavedata.h b/src/core/file_sys/archive_extsavedata.h
 index c1a2a3f..903dbda 100644
 --- a/src/core/file_sys/archive_extsavedata.h
@@ -617,6 +906,55 @@ index ef7f169..648de48 100644
  }
  SERIALIZE_IMPL(Handler)
  
+diff --git a/src/core/memory.cpp b/src/core/memory.cpp
+index b5eb9b8..67cafda 100644
+--- a/src/core/memory.cpp
++++ b/src/core/memory.cpp
+@@ -406,12 +406,18 @@ MemorySystem::~MemorySystem() = default;
+ template <class Archive>
+ void MemorySystem::serialize(Archive& ar, const unsigned int file_version) {
+     ar&* impl.get();
++    if constexpr (Archive::is_loading::value) {
++        current_page_pointers = impl->current_page_table
++                                    ? impl->current_page_table->GetPointerArray().data()
++                                    : nullptr;
++    }
+ }
+ 
+ SERIALIZE_IMPL(MemorySystem)
+ 
+ void MemorySystem::SetCurrentPageTable(std::shared_ptr<PageTable> page_table) {
+     impl->current_page_table = page_table;
++    current_page_pointers = page_table ? page_table->GetPointerArray().data() : nullptr;
+ }
+ 
+ std::shared_ptr<PageTable> MemorySystem::GetCurrentPageTable() const {
+diff --git a/src/core/memory.h b/src/core/memory.h
+index f7045c1..cfd5e82 100644
+--- a/src/core/memory.h
++++ b/src/core/memory.h
+@@ -285,6 +285,13 @@ public:
+     void SetCurrentPageTable(std::shared_ptr<PageTable> page_table);
+     std::shared_ptr<PageTable> GetCurrentPageTable() const;
+ 
++    /// Raw page pointers of the current page table (null before one is set). The interpreter
++    /// reads this to inline the plain-memory fast path of Read/Write: a page with a non-null
++    /// pointer is ordinary memory, anything else takes the regular Read/Write path.
++    u8* const* CurrentPagePointers() const {
++        return current_page_pointers;
++    }
++
+     /**
+      * Gets a pointer to the given address.
+      *
+@@ -752,6 +759,7 @@ private:
+ private:
+     class Impl;
+     std::unique_ptr<Impl> impl;
++    u8** current_page_pointers = nullptr;
+ 
+     PhysMemRegionInfo phys_mem_region_info_cache{};
+ 
 diff --git a/src/core/savestate.cpp b/src/core/savestate.cpp
 index 16c3db6..00c60d1 100644
 --- a/src/core/savestate.cpp
@@ -734,6 +1072,84 @@ index 16c3db6..00c60d1 100644
  }
  
  std::vector<u8> System::SaveStateBuffer() const {
+diff --git a/src/video_core/gpu.cpp b/src/video_core/gpu.cpp
+index 40f29fe..b277866 100644
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -23,6 +23,10 @@
+ 
+ namespace VideoCore {
+ 
++std::atomic<u64> debug_draw_count{0};
++void (*debug_top_swap_hook)(u64 draw_count) = nullptr;
++void (*debug_present_hook)() = nullptr;
++
+ constexpr VAddr VADDR_LCD = 0x1ED02000;
+ constexpr VAddr VADDR_GPU = 0x1EF00000;
+ 
+@@ -282,6 +286,9 @@ void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info
+     if (screen_id == 0) {
+         MicroProfileFlip();
+         impl->system.perf_stats->EndGameFrame();
++        if (debug_top_swap_hook) {
++            debug_top_swap_hook(debug_draw_count.load(std::memory_order_relaxed));
++        }
+         right_eye_disabler->ReportEndFrame();
+     }
+ }
+diff --git a/src/video_core/gpu.h b/src/video_core/gpu.h
+index 2298f39..6e71855 100644
+--- a/src/video_core/gpu.h
++++ b/src/video_core/gpu.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <functional>
+ #include <memory>
+ #include <boost/serialization/access.hpp>
+@@ -32,6 +33,12 @@ class EmuWindow;
+ 
+ namespace VideoCore {
+ 
++/// Frontend diagnostics (iOS port): draw calls issued so far, and hooks called when the game
++/// swaps the top screen and when a frame reaches the display. Null hooks cost nothing.
++extern std::atomic<u64> debug_draw_count;
++extern void (*debug_top_swap_hook)(u64 draw_count);
++extern void (*debug_present_hook)();
++
+ /// Measured on hardware to be 2240568 timer cycles or 4481136 ARM11 cycles
+ constexpr u64 FRAME_TICKS = 4481136ull;
+ 
+diff --git a/src/video_core/pica/pica_core.cpp b/src/video_core/pica/pica_core.cpp
+index 910ebc2..637d56e 100644
+--- a/src/video_core/pica/pica_core.cpp
++++ b/src/video_core/pica/pica_core.cpp
+@@ -10,6 +10,7 @@
+ #include "core/core.h"
+ #include "core/memory.h"
+ #include "video_core/debug_utils/debug_utils.h"
++#include "video_core/gpu.h"
+ #include "video_core/pica/pica_core.h"
+ #include "video_core/pica/vertex_loader.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -1007,6 +1008,7 @@ void PicaCore::SubmitImmediate(u32 value) {
+ }
+ 
+ void PicaCore::DrawImmediate() {
++    VideoCore::debug_draw_count.fetch_add(1, std::memory_order_relaxed);
+     // Compile the vertex shader.
+     shader_engine->SetupBatch(vs_setup, regs.internal.vs.main_offset);
+ 
+@@ -1045,6 +1047,7 @@ void PicaCore::DrawImmediate() {
+ }
+ 
+ void PicaCore::DrawArrays(bool is_indexed) {
++    VideoCore::debug_draw_count.fetch_add(1, std::memory_order_relaxed);
+     MICROPROFILE_SCOPE(GPU_Drawing);
+ 
+     // Track vertex in the debug recorder.
 diff --git a/src/video_core/rasterizer_cache/rasterizer_cache.h b/src/video_core/rasterizer_cache/rasterizer_cache.h
 index d90c638..f84b169 100644
 --- a/src/video_core/rasterizer_cache/rasterizer_cache.h
@@ -987,10 +1403,10 @@ index b0a800e..aa3bf5c 100644
      }
  #endif
 diff --git a/src/video_core/renderer_vulkan/vk_present_window.cpp b/src/video_core/renderer_vulkan/vk_present_window.cpp
-index 91ceba7..2d88489 100644
+index 91ceba7..5305ea2 100644
 --- a/src/video_core/renderer_vulkan/vk_present_window.cpp
 +++ b/src/video_core/renderer_vulkan/vk_present_window.cpp
-@@ -2,6 +2,9 @@
+@@ -2,10 +2,14 @@
  // Licensed under GPLv2 or any later version
  // Refer to the license.txt file included.
  
@@ -1000,7 +1416,12 @@ index 91ceba7..2d88489 100644
  #include "common/microprofile.h"
  #include "common/settings.h"
  #include "common/thread.h"
-@@ -328,6 +331,30 @@ void PresentWindow::PresentThread(std::stop_token token) {
+ #include "core/frontend/emu_window.h"
++#include "video_core/gpu.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_platform.h"
+ #include "video_core/renderer_vulkan/vk_present_window.h"
+@@ -328,6 +332,30 @@ void PresentWindow::PresentThread(std::stop_token token) {
          // Take the frame and notify anyone waiting
          Frame* frame = present_queue.front();
          present_queue.pop();
@@ -1031,7 +1452,7 @@ index 91ceba7..2d88489 100644
          frame_cv.notify_one();
  
          // By exchanging the lock ownership we take the swapchain lock
-@@ -335,6 +362,14 @@ void PresentWindow::PresentThread(std::stop_token token) {
+@@ -335,6 +363,14 @@ void PresentWindow::PresentThread(std::stop_token token) {
          // lock in WaitPresent is guaranteed to occur after here.
          std::exchange(lock, std::unique_lock{swapchain_mutex});
  
@@ -1046,7 +1467,7 @@ index 91ceba7..2d88489 100644
          CopyToSwapchain(frame);
  
          // Free the frame for reuse
-@@ -344,6 +379,25 @@ void PresentWindow::PresentThread(std::stop_token token) {
+@@ -344,6 +380,25 @@ void PresentWindow::PresentThread(std::stop_token token) {
      }
  }
  
@@ -1072,6 +1493,16 @@ index 91ceba7..2d88489 100644
  void PresentWindow::NotifySurfaceChanged() {
  #ifdef ANDROID
      std::scoped_lock lock{recreate_surface_mutex};
+@@ -510,6 +565,9 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
+     }
+ 
+     swapchain.Present();
++    if (VideoCore::debug_present_hook) {
++        VideoCore::debug_present_hook();
++    }
+ }
+ 
+ vk::RenderPass PresentWindow::CreateRenderpass() {
 diff --git a/src/video_core/renderer_vulkan/vk_present_window.h b/src/video_core/renderer_vulkan/vk_present_window.h
 index 3773d37..0f83aed 100644
 --- a/src/video_core/renderer_vulkan/vk_present_window.h

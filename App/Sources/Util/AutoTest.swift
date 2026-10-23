@@ -12,6 +12,20 @@ enum AutoTest {
     static var bootFile: String? { UserDefaults.standard.string(forKey: "autoboot") }
     static var shotDelay: Double { UserDefaults.standard.double(forKey: "autoshot") }
     @MainActor private static var didBoot = false
+    nonisolated(unsafe) static var perfHitchCursor: UInt64 = 0
+    nonisolated(unsafe) static var statusHitchCursor: UInt64 = 0
+
+    /// "stalls=N max=Xms [t1:gap1 ...]" for the stalls since the cursor (frame gaps > 100 ms).
+    static func hitchSummary(_ cursor: inout UInt64) -> String {
+        var buf = [AZHitch](repeating: AZHitch(), count: 64)
+        let n = Int(az_get_hitches(&cursor, &buf, Int32(buf.count)))
+        guard n > 0 else { return "stalls=0" }
+        let list = buf[0..<n]
+        let maxGap = list.map(\.gap_ms).max() ?? 0
+        let kinds = ["emu", "pic", "disp"]
+        let detail = list.suffix(8).map { String(format: "%@@%.1fs:%.0fms", kinds[Int(min(max($0.kind, 0), 2))], $0.at_s, $0.gap_ms) }.joined(separator: ",")
+        return String(format: "stalls=%d max=%.0fms [", n, maxGap) + detail + "]"
+    }
 
     static func log(_ message: String) {
         NSLog("BifoldAuto %@", message)
@@ -58,7 +72,7 @@ enum AutoTest {
                 waited += 2
                 var s = AZPerfStats()
                 let ok = az_get_perf_stats(&s)
-                log(String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d",
+                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d",
                            waited, az_is_running() ? 1 : 0, ok ? 1 : 0, s.game_fps,
                            s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0)
                     + " state=\(String(describing: core.state))")
@@ -326,7 +340,7 @@ enum RemotePlay {
                     ui += " ui=" + chain.joined(separator: ">")
                 }
                 let clock = az_debug_console_clock_offset_ms()
-                log((clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
+                log(AutoTest.hitchSummary(&AutoTest.statusHitchCursor) + " " + (clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
                            az_is_paused() ? 1 : 0, st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)) + ui)
             case "mem": log("mem \(memDetail())")
             case "heap":

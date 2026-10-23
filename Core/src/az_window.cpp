@@ -47,6 +47,10 @@ EmuWindowApple::EmuWindowApple(std::shared_ptr<Common::DynamicLibrary> driver_li
 
 EmuWindowApple::~EmuWindowApple() = default;
 
+void EmuWindowApple::PollEvents() {
+    NoteFrame();
+}
+
 bool EmuWindowApple::SetSurface(void* surface, int width_, int height_, bool is_portrait) {
     const bool changed = window_info.render_surface != surface || width != width_ ||
                          height != height_ || portrait != is_portrait;
