@@ -852,11 +852,24 @@ bool az_get_perf_stats(AZPerfStats* out) {
     if (!out || !system.IsPoweredOn()) {
         return false;
     }
-    const auto r = system.GetAndResetPerfStats();
-    out->system_fps = r.system_fps;
-    out->game_fps = r.game_fps;
-    out->emulation_speed = r.emulation_speed;
-    out->frametime_ms = r.system_fps > 0.0 ? 1000.0 / r.system_fps : 0.0;
+    // Every call resets Azahar's counters, and more than one caller polls (the app's 1 s timer,
+    // the test tooling): a call just after another measured a few milliseconds (fps 0, speed
+    // near 0). Calls less than half a second apart get the previous result.
+    static std::mutex mutex;
+    static AZPerfStats last{};
+    static std::chrono::steady_clock::time_point last_time{};
+    std::scoped_lock lock{mutex};
+    const auto now = std::chrono::steady_clock::now();
+    if (last_time == std::chrono::steady_clock::time_point{} ||
+        now - last_time >= std::chrono::milliseconds(500)) {
+        const auto r = system.GetAndResetPerfStats();
+        last.system_fps = r.system_fps;
+        last.game_fps = r.game_fps;
+        last.emulation_speed = r.emulation_speed;
+        last.frametime_ms = r.system_fps > 0.0 ? 1000.0 / r.system_fps : 0.0;
+        last_time = now;
+    }
+    *out = last;
     return true;
 }
 
