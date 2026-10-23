@@ -202,6 +202,9 @@ int az_debug_write_pgo_profile(const char* path);
 /// each time, 2 on the host FPU decoded at translation (default). `set` 0–2 changes it, -1 only
 /// reads it. Returns -1 where the host FPU path does not exist.
 int az_debug_vfp_native(int set);
+/// Debug: whether the interpreter runs its tail-call copy (1) or the original loop (0); `set` 0
+/// or 1 changes it (from the next interpreter run), -1 only reads it. -1 where not built.
+int az_debug_dyncom_tailcall(int set);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the
