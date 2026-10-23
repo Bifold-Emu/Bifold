@@ -295,6 +295,21 @@ index 68d1e1b..86beb1b 100644
  } // namespace Common::Compression
  
  namespace FileUtil {
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 37eee4f..627dc3c 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -556,3 +556,10 @@ endif()
+ if (CITRA_USE_PRECOMPILED_HEADERS)
+     target_precompile_headers(citra_core PRIVATE precompiled_headers.h)
+ endif()
++
++# iOS port: extra compiler options for the interpreter's main loop only (performance experiments),
++# e.g. AZ_INTERP_FLAGS="-mllvm -enable-tail-merge=false".
++if (DEFINED ENV{AZ_INTERP_FLAGS} AND NOT "$ENV{AZ_INTERP_FLAGS}" STREQUAL "")
++    separate_arguments(AZ_INTERP_FLAGS_LIST UNIX_COMMAND "$ENV{AZ_INTERP_FLAGS}")
++    set_source_files_properties(arm/dyncom/arm_dyncom_interpreter.cpp PROPERTIES COMPILE_OPTIONS "${AZ_INTERP_FLAGS_LIST}")
++endif()
 diff --git a/src/core/arm/dynarmic/arm_dynarmic.cpp b/src/core/arm/dynarmic/arm_dynarmic.cpp
 index 7453326..276183c 100644
 --- a/src/core/arm/dynarmic/arm_dynarmic.cpp
@@ -332,7 +347,7 @@ index 7453326..276183c 100644
      // Multi-process state
      config.processor_id = GetID();
 diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
-index d1a6c38..b918f7b 100644
+index d1a6c38..3b62703 100644
 --- a/src/core/arm/dyncom/arm_dyncom.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom.cpp
 @@ -2,6 +2,7 @@
@@ -343,29 +358,322 @@ index d1a6c38..b918f7b 100644
  #include <algorithm>
  #include <cstring>
  #include <memory>
-@@ -19,6 +20,8 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
+@@ -19,9 +20,15 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
                         std::shared_ptr<Core::Timing::Timer> timer)
      : ARM_Interface(id, timer), system(system_) {
      state = std::make_unique<ARMul_State>(system, memory, initial_mode);
 +    state->fast_block_lookup = std::getenv("AZ_SLOW_BLOCK") == nullptr;
 +    state->fast_memory = std::getenv("AZ_SLOW_MEM") == nullptr;
++    clear_on_switch = std::getenv("AZ_CLEAR_ON_SWITCH") != nullptr;
++    RegisterTransCacheUser(state.get());
  }
  
- ARM_DynCom::~ARM_DynCom() {}
-@@ -38,7 +41,7 @@ void ARM_DynCom::Step() {
+-ARM_DynCom::~ARM_DynCom() {}
++ARM_DynCom::~ARM_DynCom() {
++    UnregisterTransCacheUser(state.get());
++}
+ 
+ void ARM_DynCom::Run() {
+     if (break_flag) [[unlikely]] {
+@@ -38,8 +45,10 @@ void ARM_DynCom::Step() {
  }
  
  void ARM_DynCom::ClearInstructionCache() {
 -    state->instruction_cache.clear();
+-    trans_cache_buf_top = 0;
 +    state->ClearBlockCache();
-     trans_cache_buf_top = 0;
++    if (clear_on_switch) {
++        trans_cache_buf_top = 0;
++    }
  }
  
+ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+@@ -47,6 +56,10 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+ }
+ 
+ void ARM_DynCom::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) {
++    if (!clear_on_switch && page_table && page_table == cache_page_table.lock()) {
++        return; // same address space as the cached blocks (e.g. a core switch)
++    }
++    cache_page_table = page_table;
+     ClearInstructionCache();
+ }
+ 
+diff --git a/src/core/arm/dyncom/arm_dyncom.h b/src/core/arm/dyncom/arm_dyncom.h
+index 47d2606..6637e22 100644
+--- a/src/core/arm/dyncom/arm_dyncom.h
++++ b/src/core/arm/dyncom/arm_dyncom.h
+@@ -63,6 +63,10 @@ private:
+ 
+     Core::System& system;
+     std::unique_ptr<ARMul_State> state;
++    /// Page table the block cache was built for; switching cores re-sets the same table many
++    /// times a frame, and only a different table needs the cache cleared.
++    std::weak_ptr<Memory::PageTable> cache_page_table;
++    bool clear_on_switch = false; ///< AZ_CLEAR_ON_SWITCH: old behaviour, for A/B measurements
+ };
+ 
+ } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..f3c8f77 100644
+index 781ff3d..ba02165 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-@@ -1646,15 +1646,29 @@ DISPATCH: {
+@@ -9,6 +9,8 @@
+ #define CITRA_IGNORE_EXIT(x)
+ 
+ #include <algorithm>
++#include <array>
++#include <bit>
+ #include <cstdio>
+ #include "common/common_types.h"
+ #include "common/logging/log.h"
+@@ -39,11 +41,8 @@
+ #define ROTATE_RIGHT_32(n, i) ROTATE_RIGHT(n, i, 32)
+ #define ROTATE_LEFT_32(n, i) ROTATE_LEFT(n, i, 32)
+ 
+-static bool CondPassed(const ARMul_State* cpu, unsigned int cond) {
+-    const bool n_flag = cpu->NFlag != 0;
+-    const bool z_flag = cpu->ZFlag != 0;
+-    const bool c_flag = cpu->CFlag != 0;
+-    const bool v_flag = cpu->VFlag != 0;
++static constexpr bool CondPassedFlags(unsigned int cond, bool n_flag, bool z_flag, bool c_flag,
++                                       bool v_flag) {
+ 
+     switch (cond) {
+     case ConditionCode::EQ:
+@@ -82,7 +81,27 @@ static bool CondPassed(const ARMul_State* cpu, unsigned int cond) {
+     return false;
+ }
+ 
+-static unsigned int DPO(Immediate)(ARMul_State* cpu, unsigned int sht_oper) {
++// Bit nzcv of entry [cond] is set when the condition passes with those flags: a table lookup
++// instead of a 16-way switch (an indirect branch the CPU often mispredicts).
++static constexpr std::array<u16, 16> COND_PASS_TABLE = [] {
++    std::array<u16, 16> table{};
++    for (unsigned int cond = 0; cond < 16; cond++) {
++        for (unsigned int nzcv = 0; nzcv < 16; nzcv++) {
++            if (CondPassedFlags(cond, nzcv & 8, nzcv & 4, nzcv & 2, nzcv & 1)) {
++                table[cond] |= static_cast<u16>(1u << nzcv);
++            }
++        }
++    }
++    return table;
++}();
++
++[[gnu::always_inline]] static inline bool CondPassed(const ARMul_State* cpu, unsigned int cond) {
++    const unsigned int nzcv = (unsigned{cpu->NFlag != 0} << 3) | (unsigned{cpu->ZFlag != 0} << 2) |
++                              (unsigned{cpu->CFlag != 0} << 1) | unsigned{cpu->VFlag != 0};
++    return (COND_PASS_TABLE[cond & 0xF] >> nzcv) & 1;
++}
++
++[[gnu::always_inline]] static unsigned int DPO(Immediate)(ARMul_State* cpu, unsigned int sht_oper) {
+     unsigned int immed_8 = BITS(sht_oper, 0, 7);
+     unsigned int rotate_imm = BITS(sht_oper, 8, 11);
+     unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
+@@ -93,14 +112,14 @@ static unsigned int DPO(Immediate)(ARMul_State* cpu, unsigned int sht_oper) {
+     return shifter_operand;
+ }
+ 
+-static unsigned int DPO(Register)(ARMul_State* cpu, unsigned int sht_oper) {
++[[gnu::always_inline]] static unsigned int DPO(Register)(ARMul_State* cpu, unsigned int sht_oper) {
+     unsigned int rm = CHECK_READ_REG15(cpu, RM);
+     unsigned int shifter_operand = rm;
+     cpu->shifter_carry_out = cpu->CFlag;
+     return shifter_operand;
+ }
+ 
+-static unsigned int DPO(LogicalShiftLeftByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
++[[gnu::always_inline]] static unsigned int DPO(LogicalShiftLeftByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
+     int shift_imm = BITS(sht_oper, 7, 11);
+     unsigned int rm = CHECK_READ_REG15(cpu, RM);
+     unsigned int shifter_operand;
+@@ -134,7 +153,7 @@ static unsigned int DPO(LogicalShiftLeftByRegister)(ARMul_State* cpu, unsigned i
+     return shifter_operand;
+ }
+ 
+-static unsigned int DPO(LogicalShiftRightByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
++[[gnu::always_inline]] static unsigned int DPO(LogicalShiftRightByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
+     unsigned int rm = CHECK_READ_REG15(cpu, RM);
+     unsigned int shifter_operand;
+     int shift_imm = BITS(sht_oper, 7, 11);
+@@ -168,7 +187,7 @@ static unsigned int DPO(LogicalShiftRightByRegister)(ARMul_State* cpu, unsigned
+     return shifter_operand;
+ }
+ 
+-static unsigned int DPO(ArithmeticShiftRightByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
++[[gnu::always_inline]] static unsigned int DPO(ArithmeticShiftRightByImmediate)(ARMul_State* cpu, unsigned int sht_oper) {
+     unsigned int rm = CHECK_READ_REG15(cpu, RM);
+     unsigned int shifter_operand;
+     int shift_imm = BITS(sht_oper, 7, 11);
+@@ -236,6 +255,22 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
+     return shifter_operand;
+ }
+ 
++// The common shifter operands are called directly so they inline; the rest go through the
++// pointer chosen at decode time. Same functions either way, so the results are identical.
++[[gnu::always_inline]] static inline unsigned int ShifterOperand(ARMul_State* cpu, shtop_fp_t func, unsigned int op) {
++    if (func == DPO(Immediate))
++        return DPO(Immediate)(cpu, op);
++    if (func == DPO(Register))
++        return DPO(Register)(cpu, op);
++    if (func == DPO(LogicalShiftLeftByImmediate))
++        return DPO(LogicalShiftLeftByImmediate)(cpu, op);
++    if (func == DPO(LogicalShiftRightByImmediate))
++        return DPO(LogicalShiftRightByImmediate)(cpu, op);
++    if (func == DPO(ArithmeticShiftRightByImmediate))
++        return DPO(ArithmeticShiftRightByImmediate)(cpu, op);
++    return func(cpu, op);
++}
++
+ #define DEBUG_MSG                                                                                  \
+     LOG_DEBUG(Core_ARM11, "inst is {:x}", inst);                                                   \
+     CITRA_IGNORE_EXIT(0)
+@@ -250,7 +285,7 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
+ #define P_BIT BIT(inst, 24)
+ #define OFFSET_12 BITS(inst, 0, 11)
+ 
+-static void LnSWoUB(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
++[[gnu::always_inline]] static void LnSWoUB(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+     unsigned int addr;
+ 
+@@ -262,7 +297,7 @@ static void LnSWoUB(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsign
+     virt_addr = addr;
+ }
+ 
+-static void LnSWoUB(RegisterOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
++[[gnu::always_inline]] static void LnSWoUB(RegisterOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+     unsigned int Rm = BITS(inst, 0, 3);
+     unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
+@@ -463,7 +498,7 @@ static void LnSWoUB(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
+     }
+ }
+ 
+-static void MLnS(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
++[[gnu::always_inline]] static void MLnS(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int immedL = BITS(inst, 0, 3);
+     unsigned int immedH = BITS(inst, 8, 11);
+     unsigned int Rn = BITS(inst, 16, 19);
+@@ -550,16 +585,9 @@ static void MLnS(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
+     }
+ }
+ 
+-static void LdnStM(DecrementBefore)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
++[[gnu::always_inline]] static void LdnStM(DecrementBefore)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+-    unsigned int i = BITS(inst, 0, 15);
+-    int count = 0;
+-
+-    while (i) {
+-        if (i & 1)
+-            count++;
+-        i = i >> 1;
+-    }
++    const int count = std::popcount(BITS(inst, 0, 15));
+ 
+     virt_addr = CHECK_READ_REG15_WA(cpu, Rn) - count * 4;
+ 
+@@ -569,14 +597,7 @@ static void LdnStM(DecrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
+ 
+ static void LdnStM(IncrementBefore)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+-    unsigned int i = BITS(inst, 0, 15);
+-    int count = 0;
+-
+-    while (i) {
+-        if (i & 1)
+-            count++;
+-        i = i >> 1;
+-    }
++    const int count = std::popcount(BITS(inst, 0, 15));
+ 
+     virt_addr = CHECK_READ_REG15_WA(cpu, Rn) + 4;
+ 
+@@ -584,16 +605,9 @@ static void LdnStM(IncrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
+         cpu->Reg[Rn] += count * 4;
+ }
+ 
+-static void LdnStM(IncrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
++[[gnu::always_inline]] static void LdnStM(IncrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+-    unsigned int i = BITS(inst, 0, 15);
+-    int count = 0;
+-
+-    while (i) {
+-        if (i & 1)
+-            count++;
+-        i = i >> 1;
+-    }
++    const int count = std::popcount(BITS(inst, 0, 15));
+ 
+     virt_addr = CHECK_READ_REG15_WA(cpu, Rn);
+ 
+@@ -603,13 +617,7 @@ static void LdnStM(IncrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned
+ 
+ static void LdnStM(DecrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
+     unsigned int Rn = BITS(inst, 16, 19);
+-    unsigned int i = BITS(inst, 0, 15);
+-    int count = 0;
+-    while (i) {
+-        if (i & 1)
+-            count++;
+-        i = i >> 1;
+-    }
++    const int count = std::popcount(BITS(inst, 0, 15));
+     unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
+     unsigned int start_addr = rn - count * 4 + 4;
+ 
+@@ -669,6 +677,23 @@ static void LnSWoUB(ScaledRegisterOffset)(ARMul_State* cpu, unsigned int inst,
+     virt_addr = addr;
+ }
+ 
++// Load/store address modes: the common ones are called directly so they inline (same functions
++// as the decoded pointer, so the result is identical).
++[[gnu::always_inline]] static inline void GetAddress(ARMul_State* cpu, get_addr_fp_t func, unsigned int inst,
++                              unsigned int& addr) {
++    if (func == LnSWoUB(ImmediateOffset))
++        return LnSWoUB(ImmediateOffset)(cpu, inst, addr);
++    if (func == LdnStM(IncrementAfter))
++        return LdnStM(IncrementAfter)(cpu, inst, addr);
++    if (func == LdnStM(DecrementBefore))
++        return LdnStM(DecrementBefore)(cpu, inst, addr);
++    if (func == LnSWoUB(RegisterOffset))
++        return LnSWoUB(RegisterOffset)(cpu, inst, addr);
++    if (func == MLnS(ImmediateOffset))
++        return MLnS(ImmediateOffset)(cpu, inst, addr);
++    return func(cpu, inst, addr);
++}
++
+ shtop_fp_t GetShifterOp(unsigned int inst) {
+     if (BIT(inst, 25)) {
+         return DPO(Immediate);
+@@ -847,6 +872,7 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+ 
+ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
+     MICROPROFILE_SCOPE(DynCom_Decode);
++    EnsureTransCacheSpace();
+ 
+     // Decode instruction, get index
+     // Allocate memory and init InsCream
+@@ -876,6 +902,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+ 
+ static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
+     MICROPROFILE_SCOPE(DynCom_Decode);
++    EnsureTransCacheSpace();
+ 
+     ARM_INST_PTR inst_base = nullptr;
+     bb_start = trans_cache_buf_top;
+@@ -946,7 +973,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+ #define RDLO cpu->Reg[inst_cream->RdLo]
+ #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
+ #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
+-#define SHIFTER_OPERAND inst_cream->shtop_func(cpu, inst_cream->shifter_operand)
++#define SHIFTER_OPERAND ShifterOperand(cpu, inst_cream->shtop_func, inst_cream->shifter_operand)
+ 
+ #define FETCH_INST                                                                                 \
+     if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
+@@ -1646,15 +1673,29 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -404,6 +712,276 @@ index 781ff3d..f3c8f77 100644
      }
  
  #ifdef ENABLE_GDBSTUB
+@@ -2038,7 +2079,7 @@ LDC_INST: {
+ LDM_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         unsigned int inst = inst_cream->inst;
+         if (BIT(inst, 22) && !BIT(inst, 15)) {
+@@ -2065,19 +2106,19 @@ LDM_INST: {
+                 addr += 4;
+             }
+         } else if (!BIT(inst, 22)) {
+-            for (int i = 0; i < 16; i++) {
+-                if (BIT(inst, i)) {
+-                    unsigned int ret = cpu->ReadMemory32(addr);
+-
+-                    // For armv5t, should enter thumb when bits[0] is non-zero.
+-                    if (i == 15) {
+-                        cpu->TFlag = ret & 0x1;
+-                        ret &= 0xFFFFFFFE;
+-                    }
+-
+-                    cpu->Reg[i] = ret;
+-                    addr += 4;
++            // Visit only the listed registers, lowest first (same order as the bit scan).
++            for (u32 list = inst & 0xFFFF; list != 0; list &= list - 1) {
++                const int i = std::countr_zero(list);
++                unsigned int ret = cpu->ReadMemory32(addr);
++
++                // For armv5t, should enter thumb when bits[0] is non-zero.
++                if (i == 15) {
++                    cpu->TFlag = ret & 0x1;
++                    ret &= 0xFFFFFFFE;
+                 }
++
++                cpu->Reg[i] = ret;
++                addr += 4;
+             }
+         } else if (BIT(inst, 22) && BIT(inst, 15)) {
+             for (int i = 0; i < 15; i++) {
+@@ -2125,7 +2166,7 @@ SXTH_INST: {
+ }
+ LDR_INST: {
+     ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-    inst_cream->get_addr(cpu, inst_cream->inst, addr);
++    GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+     unsigned int value = cpu->ReadMemory32(addr);
+     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
+@@ -2146,7 +2187,7 @@ LDR_INST: {
+ LDRCOND_INST: {
+     if (CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         unsigned int value = cpu->ReadMemory32(addr);
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
+@@ -2189,7 +2230,7 @@ UXTAH_INST: {
+ LDRB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
+     }
+@@ -2201,7 +2242,7 @@ LDRB_INST: {
+ LDRBT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         const u32 dest_index = BITS(inst_cream->inst, 12, 15);
+         const u32 previous_mode = cpu->Mode;
+@@ -2222,7 +2263,7 @@ LDRD_INST: {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
+         // addr[2] == 0)
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
+         // wouldn't do this as a single read.
+@@ -2297,7 +2338,7 @@ LDREXD_INST: {
+ LDRH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
+     }
+@@ -2309,7 +2350,7 @@ LDRH_INST: {
+ LDRSB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+         unsigned int value = cpu->ReadMemory8(addr);
+         if (BIT(value, 7)) {
+             value |= 0xffffff00;
+@@ -2324,7 +2365,7 @@ LDRSB_INST: {
+ LDRSH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         unsigned int value = cpu->ReadMemory16(addr);
+         if (BIT(value, 15)) {
+@@ -2340,7 +2381,7 @@ LDRSH_INST: {
+ LDRT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         const u32 dest_index = BITS(inst_cream->inst, 12, 15);
+         const u32 previous_mode = cpu->Mode;
+@@ -3565,7 +3606,7 @@ STM_INST: {
+         unsigned int Rn = BITS(inst, 16, 19);
+         unsigned int old_RN = cpu->Reg[Rn];
+ 
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+         if (BIT(inst_cream->inst, 22) == 1) {
+             for (int i = 0; i < 13; i++) {
+                 if (BIT(inst_cream->inst, i)) {
+@@ -3593,15 +3634,14 @@ STM_INST: {
+                 cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
+             }
+         } else {
+-            for (unsigned int i = 0; i < 15; i++) {
+-                if (BIT(inst_cream->inst, i)) {
+-                    if (i == Rn)
+-                        cpu->WriteMemory32(addr, old_RN);
+-                    else
+-                        cpu->WriteMemory32(addr, cpu->Reg[i]);
++            for (u32 list = inst_cream->inst & 0x7FFF; list != 0; list &= list - 1) {
++                const unsigned int i = std::countr_zero(list);
++                if (i == Rn)
++                    cpu->WriteMemory32(addr, old_RN);
++                else
++                    cpu->WriteMemory32(addr, cpu->Reg[i]);
+ 
+-                    addr += 4;
+-                }
++                addr += 4;
+             }
+ 
+             // Check PC reg
+@@ -3635,7 +3675,7 @@ SXTB_INST: {
+ STR_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         unsigned int reg = BITS(inst_cream->inst, 12, 15);
+         unsigned int value = cpu->Reg[reg];
+@@ -3675,7 +3715,7 @@ UXTAB_INST: {
+ STRB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
+         cpu->WriteMemory8(addr, value);
+     }
+@@ -3687,7 +3727,7 @@ STRB_INST: {
+ STRBT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         const u32 previous_mode = cpu->Mode;
+         const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
+@@ -3704,7 +3744,7 @@ STRBT_INST: {
+ STRD_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
+         // so STRD wouldn't store these as a single write.
+@@ -3805,7 +3845,7 @@ STREXH_INST: {
+ STRH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
+         cpu->WriteMemory16(addr, value);
+@@ -3818,7 +3858,7 @@ STRH_INST: {
+ STRT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        GetAddress(cpu, inst_cream->get_addr, inst_cream->inst, addr);
+ 
+         const u32 previous_mode = cpu->Mode;
+         const u32 rt_index = BITS(inst_cream->inst, 12, 15);
+diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
+index 729c407..632252e 100644
+--- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
++++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
+@@ -1,4 +1,5 @@
+ #include <cstdlib>
++#include <vector>
+ #include "common/assert.h"
+ #include "common/common_types.h"
+ #include "core/arm/dyncom/arm_dyncom_trans.h"
+@@ -9,6 +10,34 @@
+ char trans_cache_buf[TRANS_CACHE_SIZE];
+ size_t trans_cache_buf_top = 0;
+ 
++namespace {
++std::vector<ARMul_State*> trans_cache_users;
++// A block ends at a branch or a page boundary: at most 2048 Thumb instructions, each well under
++// 256 bytes once translated.
++constexpr std::size_t TRANS_CACHE_MARGIN = 1024 * 1024;
++} // namespace
++
++void RegisterTransCacheUser(ARMul_State* state) {
++    trans_cache_users.push_back(state);
++}
++
++void UnregisterTransCacheUser(ARMul_State* state) {
++    std::erase(trans_cache_users, state);
++    if (trans_cache_users.empty()) {
++        trans_cache_buf_top = 0;
++    }
++}
++
++void EnsureTransCacheSpace() {
++    if (trans_cache_buf_top + TRANS_CACHE_MARGIN <= TRANS_CACHE_SIZE) {
++        return;
++    }
++    for (ARMul_State* state : trans_cache_users) {
++        state->ClearBlockCache();
++    }
++    trans_cache_buf_top = 0;
++}
++
+ static void* AllocBuffer(std::size_t size) {
+     std::size_t start = trans_cache_buf_top;
+     trans_cache_buf_top += size;
+diff --git a/src/core/arm/dyncom/arm_dyncom_trans.h b/src/core/arm/dyncom/arm_dyncom_trans.h
+index e67df42..3afe88c 100644
+--- a/src/core/arm/dyncom/arm_dyncom_trans.h
++++ b/src/core/arm/dyncom/arm_dyncom_trans.h
+@@ -496,3 +496,12 @@ extern const std::size_t arm_instruction_trans_len;
+ #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
+ extern char trans_cache_buf[TRANS_CACHE_SIZE];
+ extern std::size_t trans_cache_buf_top;
++
++// The translation buffer is shared by every ARMul_State (one per emulated core). Clearing one
++// core's block map must not reset the buffer, or the other cores' maps would point at reused
++// memory; instead the buffer is reset (and every core's map cleared) only when it fills up.
++void RegisterTransCacheUser(ARMul_State* state);
++void UnregisterTransCacheUser(ARMul_State* state);
++/// Call before translating a block: makes room by clearing every core when the buffer is
++/// nearly full.
++void EnsureTransCacheSpace();
 diff --git a/src/core/arm/skyeye_common/armstate.cpp b/src/core/arm/skyeye_common/armstate.cpp
 index 55abdf1..71ece32 100644
 --- a/src/core/arm/skyeye_common/armstate.cpp
@@ -620,6 +1198,55 @@ index 676fd29..fc490e3 100644
  private:
      void ResetMPCoreCP15Registers();
  
+diff --git a/src/core/arm/skyeye_common/armsupp.cpp b/src/core/arm/skyeye_common/armsupp.cpp
+index 6b79935..8bca444 100644
+--- a/src/core/arm/skyeye_common/armsupp.cpp
++++ b/src/core/arm/skyeye_common/armsupp.cpp
+@@ -26,21 +26,6 @@ u8 ARMul_UnsignedAbsoluteDifference(u8 left, u8 right) {
+ }
+ 
+ // Add with carry, indicates if a carry-out or signed overflow occurred.
+-u32 AddWithCarry(u32 left, u32 right, u32 carry_in, bool* carry_out_occurred,
+-                 bool* overflow_occurred) {
+-    u64 unsigned_sum = (u64)left + (u64)right + (u64)carry_in;
+-    s64 signed_sum = (s64)(s32)left + (s64)(s32)right + (s64)carry_in;
+-    u64 result = (unsigned_sum & 0xFFFFFFFF);
+-
+-    if (carry_out_occurred)
+-        *carry_out_occurred = (result != unsigned_sum);
+-
+-    if (overflow_occurred)
+-        *overflow_occurred = ((s64)(s32)result != signed_sum);
+-
+-    return (u32)result;
+-}
+-
+ // Compute whether an addition of A and B, giving RESULT, overflowed.
+ bool AddOverflow(u32 a, u32 b, u32 result) {
+     return ((NEG(a) && NEG(b) && POS(result)) || (POS(a) && POS(b) && NEG(result)));
+diff --git a/src/core/arm/skyeye_common/armsupp.h b/src/core/arm/skyeye_common/armsupp.h
+index bf9299c..4bde4dc 100644
+--- a/src/core/arm/skyeye_common/armsupp.h
++++ b/src/core/arm/skyeye_common/armsupp.h
+@@ -15,7 +15,17 @@
+ bool AddOverflow(u32, u32, u32);
+ bool SubOverflow(u32, u32, u32);
+ 
+-u32 AddWithCarry(u32, u32, u32, bool*, bool*);
++// Inline: the interpreter calls this for every ADD/SUB/CMP-style instruction.
++inline u32 AddWithCarry(u32 left, u32 right, u32 carry_in, bool* carry_out_occurred,
++                        bool* overflow_occurred) {
++    const u64 unsigned_sum = u64{left} + u64{right} + u64{carry_in};
++    const u32 result = static_cast<u32>(unsigned_sum);
++    if (carry_out_occurred)
++        *carry_out_occurred = (unsigned_sum >> 32) != 0;
++    if (overflow_occurred) // operands of equal sign, result of the other sign
++        *overflow_occurred = (((left ^ result) & (right ^ result)) >> 31) != 0;
++    return result;
++}
+ bool ARMul_AddOverflowQ(u32, u32);
+ 
+ u8 ARMul_SignedSaturatedAdd8(u8, u8);
 diff --git a/src/core/file_sys/archive_extsavedata.h b/src/core/file_sys/archive_extsavedata.h
 index c1a2a3f..903dbda 100644
 --- a/src/core/file_sys/archive_extsavedata.h

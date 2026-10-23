@@ -22,6 +22,8 @@
 #include <malloc/malloc.h>
 #include <mach/mach.h>
 #include <os/lock.h>
+#include <pthread.h>
+#include <unistd.h>
 #endif
 
 #include "az_internal.h"
@@ -46,6 +48,7 @@
 #include "core/hle/service/fs/archive.h"
 #include "core/loader/loader.h"
 #include "core/loader/smdh.h"
+#include "core/memory.h"
 #include "core/savestate.h"
 #include "video_core/gpu.h"
 #include "video_core/rasterizer_interface.h"
@@ -583,7 +586,18 @@ void az_set_surface(void* surface, int width_px, int height_px, bool is_portrait
     RequestSurfaceUpdate();
 }
 
+#ifdef __APPLE__
+namespace {
+std::atomic<mach_port_t> g_emu_thread_port{MACH_PORT_NULL};
+std::atomic<pthread_t> g_emu_pthread{nullptr};
+} // namespace
+#endif
+
 AZResult az_run_game(const char* path) {
+#ifdef __APPLE__
+    g_emu_pthread = pthread_self();
+    g_emu_thread_port = pthread_mach_thread_np(pthread_self());
+#endif
     auto& st = GetState();
     if (!st.initialized || !path) {
         return AZ_RESULT_ERROR_OTHER;
@@ -1327,3 +1341,139 @@ int64_t az_debug_console_clock_offset_ms(void) {
     return console - host;
 }
 
+
+int az_debug_profile(const char* path, int seconds, int hz) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    const mach_port_t thread = g_emu_thread_port.load();
+    const pthread_t pthread = g_emu_pthread.load();
+    if (!path || thread == MACH_PORT_NULL || !pthread || seconds <= 0 || hz <= 0) {
+        return -1;
+    }
+    const auto stack_hi = reinterpret_cast<uintptr_t>(pthread_get_stackaddr_np(pthread));
+    const uintptr_t stack_lo = stack_hi - pthread_get_stacksize_np(pthread);
+    constexpr int Depth = 12;
+    std::vector<std::array<uint64_t, Depth>> samples;
+    std::vector<uint32_t> guest_pcs; // emulated ARM11 PC of the running core, per sample
+    guest_pcs.reserve(static_cast<size_t>(seconds) * hz + 16);
+    auto& system = Core::System::GetInstance();
+    // No allocation while the emulation thread is suspended (it may hold the malloc lock).
+    samples.reserve(static_cast<size_t>(seconds) * hz + 16);
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    const useconds_t interval = static_cast<useconds_t>(1000000 / hz);
+    while (std::chrono::steady_clock::now() < end && samples.size() < samples.capacity()) {
+        if (thread_suspend(thread) == KERN_SUCCESS) {
+            arm_thread_state64_t state;
+            mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+            if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state),
+                                 &count) == KERN_SUCCESS) {
+                std::array<uint64_t, Depth> a{};
+                a[0] = arm_thread_state64_get_pc(state);
+                a[1] = arm_thread_state64_get_lr(state);
+                uint64_t fp = arm_thread_state64_get_fp(state);
+                for (int i = 2; i < Depth; ++i) {
+                    if (fp < stack_lo || fp + 16 > stack_hi || (fp & 7) != 0) {
+                        break;
+                    }
+                    const auto* frame = reinterpret_cast<const uint64_t*>(fp);
+                    a[i] = frame[1];
+                    if (frame[0] <= fp) {
+                        break;
+                    }
+                    fp = frame[0];
+                }
+                samples.push_back(a);
+                guest_pcs.push_back(system.IsPoweredOn() ? system.GetRunningCore().GetPC() : 0);
+            }
+            thread_resume(thread);
+        }
+        usleep(interval);
+    }
+    // Resolve images after sampling: "I <index> <base> <path>" lines, then "S idx:offset ...".
+    std::map<uintptr_t, int> image_index;
+    std::vector<std::pair<uintptr_t, std::string>> images;
+    std::string out;
+    out.reserve(samples.size() * 120);
+    for (const auto& a : samples) {
+        out += "S";
+        for (uint64_t pc : a) {
+            if (pc == 0) {
+                break;
+            }
+            Dl_info info{};
+            if (!dladdr(reinterpret_cast<void*>(pc), &info) || !info.dli_fbase) {
+                out += " ?";
+                continue;
+            }
+            const auto base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+            auto it = image_index.find(base);
+            if (it == image_index.end()) {
+                it = image_index.emplace(base, static_cast<int>(images.size())).first;
+                images.emplace_back(base, info.dli_fname ? info.dli_fname : "?");
+            }
+            out += fmt::format(" {}:{:x}", it->second, pc - base);
+        }
+        out += "\n";
+    }
+    // Hottest emulated PCs, with the guest code around them (read after sampling).
+    std::map<uint32_t, int> pc_count;
+    for (uint32_t pc : guest_pcs) {
+        ++pc_count[pc & ~1u];
+    }
+    std::vector<std::pair<int, uint32_t>> hot;
+    for (const auto& [pc, n] : pc_count) {
+        hot.emplace_back(n, pc);
+    }
+    std::sort(hot.rbegin(), hot.rend());
+    std::string guest = fmt::format("G total {}\n", guest_pcs.size());
+    for (size_t i = 0; i < hot.size() && i < 40; ++i) {
+        guest += fmt::format("G {:08x} {}", hot[i].second, hot[i].first);
+        if (i < 12 && system.IsPoweredOn()) {
+            auto& memory = system.Memory();
+            const uint32_t start = (hot[i].second & ~3u) - 32;
+            for (uint32_t a = start; a < start + 96; a += 4) {
+                guest += fmt::format(" {:08x}", memory.IsValidVirtualAddress(
+                                                     *system.Kernel().GetCurrentProcess(), a)
+                                                     ? memory.Read32(a)
+                                                     : 0u);
+            }
+        }
+        guest += "\n";
+    }
+    std::string head = guest;
+    for (size_t i = 0; i < images.size(); ++i) {
+        head += fmt::format("I {} {:x} {}\n", i, images[i].first, images[i].second);
+    }
+    FILE* f = std::fopen(path, "w");
+    if (!f) {
+        return -1;
+    }
+    std::fwrite(head.data(), 1, head.size(), f);
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fclose(f);
+    return static_cast<int>(samples.size());
+#else
+    (void)path;
+    (void)seconds;
+    (void)hz;
+    return -1;
+#endif
+}
+
+// Profile runtime entry points exist only when something was built with -fprofile-instr-generate,
+// so they are looked up at run time.
+int az_debug_write_pgo_profile(const char* path) {
+#ifdef __APPLE__
+    using SetName = void (*)(const char*);
+    using Write = int (*)(void);
+    auto set_name = reinterpret_cast<SetName>(dlsym(RTLD_DEFAULT, "__llvm_profile_set_filename"));
+    auto write = reinterpret_cast<Write>(dlsym(RTLD_DEFAULT, "__llvm_profile_write_file"));
+    if (!path || !set_name || !write) {
+        return -1;
+    }
+    set_name(path);
+    return write() == 0 ? 0 : -1;
+#else
+    (void)path;
+    return -1;
+#endif
+}

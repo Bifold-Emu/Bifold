@@ -72,7 +72,7 @@ enum AutoTest {
                 waited += 2
                 var s = AZPerfStats()
                 let ok = az_get_perf_stats(&s)
-                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d",
+                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d",
                            waited, az_is_running() ? 1 : 0, ok ? 1 : 0, s.game_fps,
                            s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0)
                     + " state=\(String(describing: core.state))")
@@ -340,8 +340,17 @@ enum RemotePlay {
                     ui += " ui=" + chain.joined(separator: ">")
                 }
                 let clock = az_debug_console_clock_offset_ms()
-                log(AutoTest.hitchSummary(&AutoTest.statusHitchCursor) + " " + (clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
+                log(AutoTest.hitchSummary(&AutoTest.statusHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + (clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
                            az_is_paused() ? 1 : 0, st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)) + ui)
+            case "pgo":
+                // pgo: write the PGO counters of an instrumented build to remote/interp.profraw.
+                let rc = az_debug_write_pgo_profile(dir.appendingPathComponent("interp.profraw").path)
+                log("pgo rc=\(rc)")
+            case "prof":
+                // prof seconds hz: sample the emulation thread's stack into remote/prof.txt.
+                let secs = n(1, 10), hz = n(2, 1000)
+                let count = az_debug_profile(dir.appendingPathComponent("prof.txt").path, Int32(secs), Int32(hz))
+                log("prof samples=\(count)")
             case "mem": log("mem \(memDetail())")
             case "heap":
                 // Big live malloc blocks by size: what is left behind after save/load.

@@ -188,6 +188,13 @@ char* az_debug_heap(void);
 void az_debug_track_big_allocs(size_t min_bytes);
 /// Debug: emulated console clock minus host local time, in ms (INT64_MIN when not running).
 int64_t az_debug_console_clock_offset_ms(void);
+/// Debug: samples the emulation thread's call stack `hz` times per second for `seconds`
+/// (suspend, read registers, walk frame pointers, resume) and writes one line per sample to
+/// `path`: image-relative return addresses, leaf first. Returns the sample count, or -1.
+int az_debug_profile(const char* path, int seconds, int hz);
+/// Debug: in a build instrumented with -fprofile-instr-generate, writes the profile counters to
+/// `path` (for PGO). Returns 0 on success, -1 when the build is not instrumented.
+int az_debug_write_pgo_profile(const char* path);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the
