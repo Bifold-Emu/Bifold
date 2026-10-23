@@ -26,6 +26,7 @@ struct SettingsView: View {
                 row("导入与安装", "tray.and.arrow.down.fill", 0x6E7787, s.deleteCIAAfterInstall ? "删除原 CIA" : "保留原 CIA") { ImportSettings() }
             }
             Section {
+                row("开发者选项", "hammer.fill", 0x6E7787, s.perfOverlay.shortTitle) { DeveloperSettings() }
                 row("关于 Bifold", "info.circle.fill", 0x3A4556, nil) { AboutView() }
             }
         }
@@ -139,6 +140,28 @@ private struct PerformanceSettings: View {
             } footer: { Text("CPU 频率高于 100% 可让个别掉帧的游戏更流畅，但也可能让游戏出错。") }
         }
         .tint(Theme.accent).themedList().navigationTitle("性能")
+    }
+}
+
+private struct DeveloperSettings: View {
+    @ObservedObject private var s = AppSettings.shared
+    var body: some View {
+        ThemedForm {
+            Section {
+                Picker("性能信息", selection: Binding(get: { s.perfOverlay }, set: { s.perfOverlay = $0 })) {
+                    ForEach(AppSettings.PerfOverlay.allCases) { Text($0.title).tag($0) }
+                }
+            } header: { Text("游戏画面右上角") } footer: {
+                Text("""
+                帧率：游戏每秒画出多少帧。很多 3D 游戏（比如宝可梦）在真机上本来就是 30 fps。
+                速度：和真机相比跑得多快。100% 是原速；低于 100% 时，画面、动作和声音都会变慢。
+                JIT / 无 JIT：JIT 开启时，模拟器能以接近原生的速度执行游戏代码；没有 JIT 时只能逐条解释执行，3D 游戏通常只有原速的一半左右。
+                帧时间：模拟器做完一帧所用的毫秒数。
+                选「不显示」时，只有在没开 JIT 且明显变慢时，才会短暂提示一次。
+                """)
+            }
+        }
+        .tint(Theme.accent).themedList().navigationTitle("开发者选项")
     }
 }
 

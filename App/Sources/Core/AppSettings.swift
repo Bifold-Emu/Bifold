@@ -46,6 +46,26 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// What the in-game status bar shows about speed (Settings → 开发者选项).
+    enum PerfOverlay: Int, CaseIterable, Identifiable {
+        case off = 0, fps = 1, detailed = 2
+        var id: Int { rawValue }
+        var title: String {
+            switch self {
+            case .off: return "不显示"
+            case .fps: return "只显示帧率"
+            case .detailed: return "详细（JIT、帧率、速度、帧时间）"
+            }
+        }
+        var shortTitle: String {
+            switch self {
+            case .off: return "性能信息关"
+            case .fps: return "帧率"
+            case .detailed: return "详细"
+            }
+        }
+    }
+
     // MARK: Graphics
     @AppStorage("resolutionFactor") var resolutionFactor = 2 { willSet { objectWillChange.send() } }
     @AppStorage("asyncShaders") var asyncShaders = true { willSet { objectWillChange.send() } }
@@ -67,6 +87,13 @@ final class AppSettings: ObservableObject {
     var jitMode: JITMode {
         get { JITMode(rawValue: jitModeRaw) ?? .auto }
         set { jitModeRaw = newValue.rawValue }
+    }
+
+    // MARK: Developer
+    @AppStorage("perfOverlay") private var perfOverlayRaw = PerfOverlay.off.rawValue { willSet { objectWillChange.send() } }
+    var perfOverlay: PerfOverlay {
+        get { PerfOverlay(rawValue: perfOverlayRaw) ?? .off }
+        set { perfOverlayRaw = newValue.rawValue }
     }
 
     // MARK: Layout

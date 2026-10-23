@@ -24,6 +24,10 @@ struct EmulationScreen: View {
     /// Top screen as it was when the panel opened; becomes the picture of a slot saved from it.
     @State private var pausePicture: UIImage?
     @State private var toast: String?
+    /// One-time hint (per game session) when the game runs well below full speed without JIT.
+    @State private var showSlowHint = false
+    @State private var slowSince: Date?
+    @State private var slowHintDone = false
 
     private var showController: Bool {
         !(settings.hideControllerWithGamepad && input.hasGamepad)
@@ -105,6 +109,7 @@ struct EmulationScreen: View {
                 }
             }
         }
+        .onReceive(core.$perf) { stats in checkSlow(stats) }
         .onChange(of: showMenu) { shown in
             #if DEBUG
             if RemotePlay.enabled { RemotePlay.log("pause menu \(shown ? "shown" : "dismissed")") }
@@ -142,12 +147,24 @@ struct EmulationScreen: View {
             }
             Spacer()
             if core.state == .running {
-                pill {
-                    StatusLight(color: JITHelper.isEnabled ? Theme.led : .orange)
-                    Text(JITHelper.isEnabled ? "JIT" : "解释器")
-                    Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit()
-                    if core.perf.emulation_speed < 0.95 || core.isFastForward {
-                        Text(String(format: "%.0f%%", core.perf.emulation_speed * 100)).monospacedDigit()
+                switch settings.perfOverlay {
+                case .off:
+                    if showSlowHint {
+                        pill {
+                            StatusLight(color: .orange)
+                            Text(slowHintText)
+                        }
+                        .transition(.opacity)
+                    }
+                case .fps:
+                    pill { Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit() }
+                case .detailed:
+                    pill {
+                        StatusLight(color: JITHelper.isEnabled ? Theme.led : .orange)
+                        Text(JITHelper.isEnabled ? "JIT" : "无 JIT")
+                        Text(String(format: "%.0f fps", core.perf.game_fps)).monospacedDigit()
+                        Text(String(format: "速度 %.0f%%", core.perf.emulation_speed * 100)).monospacedDigit()
+                        Text(String(format: "%.1f ms", core.perf.frametime_ms)).monospacedDigit()
                     }
                 }
             }
@@ -235,6 +252,23 @@ struct EmulationScreen: View {
     private func resume() {
         showPanel(false)
         core.setPaused(false)
+    }
+
+    private var slowHintText: String {
+        JITHelper.status == AZ_JIT_DISABLED_BUILD ? "此版本不能用 JIT，运行偏慢" : "没开 JIT，运行偏慢 · 可在设置里开启"
+    }
+
+    private func checkSlow(_ stats: AZPerfStats) {
+        guard !slowHintDone, settings.perfOverlay == .off, !JITHelper.isEnabled else { return }
+        guard core.state == .running, !core.isFastForward, stats.emulation_speed > 0, stats.emulation_speed < 0.8 else {
+            slowSince = nil
+            return
+        }
+        guard let since = slowSince else { slowSince = Date(); return }
+        guard Date().timeIntervalSince(since) > 5 else { return }
+        slowHintDone = true
+        withAnimation { showSlowHint = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { withAnimation { showSlowHint = false } }
     }
 
     private func show(_ message: String) {
