@@ -136,8 +136,13 @@ private struct PerformanceSettings: View {
             Section {
                 Stepper("快进速度 \(s.fastForwardSpeed)%", value: $s.fastForwardSpeed, in: 150...1000, step: 50)
                 Stepper("帧率上限 \(s.frameLimit)%", value: $s.frameLimit, in: 25...400, step: 25)
-                Stepper("CPU 频率 \(s.cpuClock)%", value: $s.cpuClock, in: 25...400, step: 25)
-            } footer: { Text("CPU 频率高于 100% 可让个别掉帧的游戏更流畅，但也可能让游戏出错。") }
+                Toggle("自动 CPU 频率", isOn: $s.cpuClockAuto)
+                Stepper(s.cpuClockAuto ? "CPU 频率 自动（\(s.effectiveCPUClock)%）" : "CPU 频率 \(s.cpuClock)%",
+                        value: $s.cpuClock, in: 25...400, step: 25)
+                    .disabled(s.cpuClockAuto)
+            } footer: {
+                Text("自动：没有 JIT 时用 50%，解释器能保持全速，大多数游戏的算力也够用；有 JIT 时用 100%。手动调低能更快，但游戏加载时可能卡住；高于 100% 可让个别掉帧的游戏更流畅，但也可能让游戏出错。")
+            }
         }
         .tint(Theme.accent).themedList().navigationTitle("性能")
     }

@@ -77,6 +77,11 @@ final class AppSettings: ObservableObject {
 
     // MARK: Performance
     @AppStorage("cpuClock") var cpuClock = 100 { willSet { objectWillChange.send() } }
+    /// "Auto": 50 % without JIT, 100 % with JIT. Measured on an iPhone 14 Pro Max: without JIT the
+    /// interpreter keeps Pokémon Sun at full speed at 50 % (25 % starves its loading threads and
+    /// freezes the picture at scene changes; 100 % runs at roughly half speed).
+    @AppStorage("cpuClockAuto") var cpuClockAuto = true { willSet { objectWillChange.send() } }
+    var effectiveCPUClock: Int { cpuClockAuto ? (JITHelper.isEnabled ? 100 : 50) : cpuClock }
     @AppStorage("frameLimit") var frameLimit = 100 { willSet { objectWillChange.send() } }
     @AppStorage("fastForwardSpeed") var fastForwardSpeed = 300 { willSet { objectWillChange.send() } }
     @AppStorage("jitMode") private var jitModeRaw = JITMode.auto.rawValue { willSet { objectWillChange.send() } }
@@ -127,8 +132,14 @@ final class AppSettings: ObservableObject {
     @AppStorage("lanDiscovery") var lanDiscovery = true { willSet { objectWillChange.send() } }
 
     private init() {
-        // 0.55 was the old default; with the lighter keys it is too faint. Move it up once.
         let d = UserDefaults.standard
+        // Someone who already picked a CPU clock keeps it instead of the new automatic default.
+        // (Saved values only: test launches pass -cpuClock as an argument, which must not count.)
+        let saved = d.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "") ?? [:]
+        if saved["cpuClockAuto"] == nil, let manual = saved["cpuClock"] as? Int, manual != 100 {
+            cpuClockAuto = false
+        }
+        // 0.55 was the old default; with the lighter keys it is too faint. Move it up once.
         if !d.bool(forKey: "controllerOpacityMigrated") {
             if d.object(forKey: "controllerOpacity") != nil, abs(controllerOpacity - 0.55) < 0.001 { controllerOpacity = 0.75 }
             d.set(true, forKey: "controllerOpacityMigrated")
@@ -153,7 +164,7 @@ final class AppSettings: ObservableObject {
         ; Written by the 3DS_iOS app. Edit settings in the app instead of here.
         [Core]
         use_cpu_jit = \(allowJIT)
-        cpu_clock_percentage = \(cpuClock)
+        cpu_clock_percentage = \(effectiveCPUClock)
 
         [Renderer]
         graphics_api = 2

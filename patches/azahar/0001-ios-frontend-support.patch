@@ -347,7 +347,7 @@ index 7453326..276183c 100644
      // Multi-process state
      config.processor_id = GetID();
 diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
-index d1a6c38..3b62703 100644
+index d1a6c38..b4e77b0 100644
 --- a/src/core/arm/dyncom/arm_dyncom.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom.cpp
 @@ -2,6 +2,7 @@
@@ -358,12 +358,10 @@ index d1a6c38..3b62703 100644
  #include <algorithm>
  #include <cstring>
  #include <memory>
-@@ -19,9 +20,15 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
+@@ -19,9 +20,13 @@ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
                         std::shared_ptr<Core::Timing::Timer> timer)
      : ARM_Interface(id, timer), system(system_) {
      state = std::make_unique<ARMul_State>(system, memory, initial_mode);
-+    state->fast_block_lookup = std::getenv("AZ_SLOW_BLOCK") == nullptr;
-+    state->fast_memory = std::getenv("AZ_SLOW_MEM") == nullptr;
 +    clear_on_switch = std::getenv("AZ_CLEAR_ON_SWITCH") != nullptr;
 +    RegisterTransCacheUser(state.get());
  }
@@ -375,7 +373,7 @@ index d1a6c38..3b62703 100644
  
  void ARM_DynCom::Run() {
      if (break_flag) [[unlikely]] {
-@@ -38,8 +45,10 @@ void ARM_DynCom::Step() {
+@@ -38,8 +43,10 @@ void ARM_DynCom::Step() {
  }
  
  void ARM_DynCom::ClearInstructionCache() {
@@ -388,7 +386,7 @@ index d1a6c38..3b62703 100644
  }
  
  void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
-@@ -47,6 +56,10 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+@@ -47,6 +54,10 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
  }
  
  void ARM_DynCom::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) {
@@ -415,7 +413,7 @@ index 47d2606..6637e22 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..ba02165 100644
+index 781ff3d..b626916 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,8 @@
@@ -673,7 +671,7 @@ index 781ff3d..ba02165 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1646,15 +1673,29 @@ DISPATCH: {
+@@ -1646,15 +1673,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -689,8 +687,7 @@ index 781ff3d..ba02165 100644
 +    {
 +        const u32 pc = cpu->Reg[15];
 +        auto& fast = cpu->fast_block_cache[(pc >> 1) & (cpu->fast_block_cache.size() - 1)];
-+        if (fast.pc == pc && fast.generation == cpu->block_cache_generation &&
-+            cpu->fast_block_lookup) [[likely]] {
++        if (fast.pc == pc && fast.generation == cpu->block_cache_generation) [[likely]] {
 +            ptr = fast.ptr;
 +        } else {
 +            auto itr = cpu->instruction_cache.find(pc);
@@ -712,7 +709,7 @@ index 781ff3d..ba02165 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -2038,7 +2079,7 @@ LDC_INST: {
+@@ -2038,7 +2078,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -721,7 +718,7 @@ index 781ff3d..ba02165 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2106,19 @@ LDM_INST: {
+@@ -2065,19 +2105,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -753,7 +750,7 @@ index 781ff3d..ba02165 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2166,7 @@ SXTH_INST: {
+@@ -2125,7 +2165,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -762,7 +759,7 @@ index 781ff3d..ba02165 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2187,7 @@ LDR_INST: {
+@@ -2146,7 +2186,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -771,7 +768,7 @@ index 781ff3d..ba02165 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2230,7 @@ UXTAH_INST: {
+@@ -2189,7 +2229,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -780,7 +777,7 @@ index 781ff3d..ba02165 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2242,7 @@ LDRB_INST: {
+@@ -2201,7 +2241,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -789,7 +786,7 @@ index 781ff3d..ba02165 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2263,7 @@ LDRD_INST: {
+@@ -2222,7 +2262,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -798,7 +795,7 @@ index 781ff3d..ba02165 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2338,7 @@ LDREXD_INST: {
+@@ -2297,7 +2337,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -807,7 +804,7 @@ index 781ff3d..ba02165 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2350,7 @@ LDRH_INST: {
+@@ -2309,7 +2349,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -816,7 +813,7 @@ index 781ff3d..ba02165 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2365,7 @@ LDRSB_INST: {
+@@ -2324,7 +2364,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -825,7 +822,7 @@ index 781ff3d..ba02165 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2381,7 @@ LDRSH_INST: {
+@@ -2340,7 +2380,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -834,7 +831,7 @@ index 781ff3d..ba02165 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3606,7 @@ STM_INST: {
+@@ -3565,7 +3605,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -843,7 +840,7 @@ index 781ff3d..ba02165 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3634,14 @@ STM_INST: {
+@@ -3593,15 +3633,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -866,7 +863,7 @@ index 781ff3d..ba02165 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3675,7 @@ SXTB_INST: {
+@@ -3635,7 +3674,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -875,7 +872,7 @@ index 781ff3d..ba02165 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3715,7 @@ UXTAB_INST: {
+@@ -3675,7 +3714,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -884,7 +881,7 @@ index 781ff3d..ba02165 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3727,7 @@ STRB_INST: {
+@@ -3687,7 +3726,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -893,7 +890,7 @@ index 781ff3d..ba02165 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3744,7 @@ STRBT_INST: {
+@@ -3704,7 +3743,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -902,7 +899,7 @@ index 781ff3d..ba02165 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3845,7 @@ STREXH_INST: {
+@@ -3805,7 +3844,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -911,7 +908,7 @@ index 781ff3d..ba02165 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3858,7 @@ STRH_INST: {
+@@ -3818,7 +3857,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1049,7 +1046,7 @@ index 55abdf1..71ece32 100644
          data = Common::swap64(data);
  
 diff --git a/src/core/arm/skyeye_common/armstate.h b/src/core/arm/skyeye_common/armstate.h
-index 676fd29..fc490e3 100644
+index 676fd29..6e6e5ea 100644
 --- a/src/core/arm/skyeye_common/armstate.h
 +++ b/src/core/arm/skyeye_common/armstate.h
 @@ -22,8 +22,11 @@
@@ -1160,14 +1157,14 @@ index 676fd29..fc490e3 100644
 +    static constexpr u32 PAGE_OFFSET_MASK = (1u << PAGE_BITS) - 1;
 +    /// Host pointer of the page holding `address` if it is plain memory, else null.
 +    u8* FastPage(u32 address) const {
-+        u8* const* pages = fast_memory ? memory.CurrentPagePointers() : nullptr;
++        u8* const* pages = memory.CurrentPagePointers();
 +        return pages ? pages[address >> PAGE_BITS] : nullptr;
 +    }
 +
      std::array<u32, 16> Reg{}; // The current register file
      std::array<u32, 2> Reg_usr{};
      std::array<u32, 2> Reg_svc{};   // R13_SVC R14_SVC
-@@ -264,6 +340,30 @@ public:
+@@ -264,6 +340,27 @@ public:
      // process for our purposes), not per ARMul_State (which tracks CPU core state).
      std::unordered_map<u32, std::size_t> instruction_cache;
  
@@ -1183,9 +1180,6 @@ index 676fd29..fc490e3 100644
 +    static constexpr std::size_t FAST_BLOCK_CACHE_BITS = 13;
 +    std::array<FastBlockEntry, std::size_t{1} << FAST_BLOCK_CACHE_BITS> fast_block_cache{};
 +    u32 block_cache_generation = 1;
-+    // A/B switches for measuring the interpreter fast paths (env AZ_SLOW_BLOCK / AZ_SLOW_MEM).
-+    bool fast_block_lookup = true;
-+    bool fast_memory = true;
 +
 +    void ClearBlockCache() {
 +        instruction_cache.clear();
