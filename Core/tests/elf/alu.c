@@ -112,6 +112,46 @@ __attribute__((noinline, target("thumb"))) static u32 thumb_mid(u32 x, u32 (*f)(
 }
 static u32 (*volatile rec_ptr)(u32, u32) = rec;
 
+
+// A block ends at a page boundary: pagecross() puts specialisable instructions in the last
+// words of a page and goes on in the next one.
+u32 pagecross(u32 x);
+asm(".text\n.arm\n.p2align 12\n.space 4084\n.global pagecross\npagecross:\n"
+    "add r0, r0, #1\n"     // page offset 0xff4
+    "eor r0, r0, r0, lsl #3\n"
+    "add r0, r0, #2\n"     // 0xffc: last word of the page
+    "sub r0, r0, #3\n"     // next page
+    "bx lr\n");
+
+
+// Loads and stores with writeback (post-indexed and pre-indexed !) and register moves.
+__attribute__((noinline)) static u32 wb(u32 a, u32 b, u32* m, u32 h) {
+    u32 p = (u32)m, t, f;
+    asm volatile(
+        "str %[a], [%[p]], #4\n\t"
+        "str %[b], [%[p]], #-8\n\t"
+        "ldr %[t], [%[p]], #4\n\t" FOLD
+        "add %[h], %[h], %[p]\n\t"
+        "ldr %[t], [%[p], #4]!\n\t" FOLD
+        "str %[t], [%[p], #-12]!\n\t"
+        "add %[h], %[h], %[p], lsl #2\n\t"
+        "strb %[a], [%[p]], #1\n\t"
+        "strb %[b], [%[p]], #2\n\t"
+        "ldrb %[t], [%[p], #-3]!\n\t" FOLD
+        "ldrb %[t], [%[p]], #1\n\t" FOLD
+        "strb %[h], [%[p], #2]!\n\t"
+        "ldr %[t], [%[p], #-3]!\n\t" FOLD
+        "sub %[h], %[h], %[p]\n\t"
+        "cmp %[a], %[b]\n\tldrhi %[t], [%[p]], #4\n\tstrls %[a], [%[p], #4]!\n\t" FOLD
+        "add %[h], %[h], %[p]\n\t"
+        "mov %[t], %[a]\n\t" FOLD
+        "cmp %[b], #0x8000\n\tmovlo %[t], %[b]\n\t" FOLD
+        : [t] "=&r"(t), [f] "=&r"(f), [h] "+&r"(h), [p] "+&r"(p)
+        : [a] "r"(a), [b] "r"(b)
+        : "cc", "memory");
+    return h - (u32)m;
+}
+
 static void band(u8* fb, u32 rows, u32 hash) {
     for (u32 y = 0; y < rows; ++y) {
         const u32 bit = (hash >> ((y * 32) / rows)) & 1;
@@ -142,6 +182,8 @@ __attribute__((noreturn, section(".text.start"))) void _start(void) {
         h = (h ^ ldmstm(a, b, c, &big[1016 + (i & 15)])) * 0x9E3779B1u;
         if ((i & 63) == 0)
             h += rec(18 + (i & 1), a) ^ rec_ptr(i & 7, b) ^ thumb_mid(c, rec_ptr);
+        h = pagecross(h ^ a);
+        h = wb(a, b, &mem[16 + (i & 15)], h);
     }
     for (;;) {
         band((u8*)0x1F1E6000, 400, h);

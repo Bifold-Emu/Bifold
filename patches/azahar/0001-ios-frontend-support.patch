@@ -465,7 +465,7 @@ index 47d2606..9625528 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..a699446 100644
+index 781ff3d..9e2f7bf 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,11 @@
@@ -718,7 +718,7 @@ index 781ff3d..a699446 100644
  shtop_fp_t GetShifterOp(unsigned int inst) {
      if (BIT(inst, 25)) {
          return DPO(Immediate);
-@@ -813,6 +858,11 @@ enum { KEEP_GOING, FETCH_EXCEPTION };
+@@ -813,8 +858,14 @@ enum { KEEP_GOING, FETCH_EXCEPTION };
  
  MICROPROFILE_DEFINE(DynCom_Decode, "DynCom", "Decode", MP_RGB(255, 64, 64));
  
@@ -728,14 +728,20 @@ index 781ff3d..a699446 100644
 +std::atomic<bool> g_dyncom_special{std::getenv("AZ_DYNCOM_NO_SPECIAL") == nullptr};
 +
  static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, const u32 phys_addr,
-                                                     ARM_INST_PTR& inst_base) {
+-                                                    ARM_INST_PTR& inst_base) {
++                                                    ARM_INST_PTR& inst_base,
++                                                    bool specialize = true) {
      u32 inst_size = 4;
-@@ -841,12 +891,18 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+     u32 inst = cpu->memory.Read32(phys_addr & 0xFFFFFFFC);
+ 
+@@ -841,12 +892,20 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
          CITRA_IGNORE_EXIT(-1);
      }
      inst_base = arm_instruction_trans[idx](inst, idx);
 +#if defined __GNUC__ || defined __clang__ // the switch fallback has no specialised handlers
-+    if (!cpu->TFlag && g_dyncom_special.load(std::memory_order_relaxed)) {
++    // Not for single-step translations: the specialised handlers assume the next instruction of
++    // the block follows (a single-step block has none).
++    if (specialize && !cpu->TFlag && g_dyncom_special.load(std::memory_order_relaxed)) {
 +        SpecializeArmInstruction(inst_base, inst, phys_addr);
 +    }
 +#endif
@@ -749,7 +755,7 @@ index 781ff3d..a699446 100644
  
      // Decode instruction, get index
      // Allocate memory and init InsCream
-@@ -876,6 +932,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+@@ -876,6 +935,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
  
  static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
      MICROPROFILE_SCOPE(DynCom_Decode);
@@ -757,7 +763,16 @@ index 781ff3d..a699446 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -921,9 +978,82 @@ static int clz(unsigned int x) {
+@@ -883,7 +943,7 @@ static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u
+     u32 phys_addr = addr;
+     u32 pc_start = cpu->Reg[15];
+ 
+-    InterpreterTranslateInstruction(cpu, phys_addr, inst_base);
++    InterpreterTranslateInstruction(cpu, phys_addr, inst_base, false);
+ 
+     if (inst_base->br == TransExtData::NON_BRANCH) {
+         inst_base->br = TransExtData::SINGLE_STEP;
+@@ -921,9 +981,82 @@ static int clz(unsigned int x) {
  
  MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
  
@@ -840,7 +855,7 @@ index 781ff3d..a699446 100644
  #ifdef ENABLE_GDBSTUB
      /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
      GDBStub::BreakpointAddress breakpoint_data;
-@@ -946,7 +1076,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -946,7 +1079,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -849,7 +864,7 @@ index 781ff3d..a699446 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1622,9 +1752,35 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1622,9 +1755,80 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
                           &&BL_1_THUMB,
                           &&BL_2_THUMB,
                           &&BLX_1_THUMB,
@@ -878,6 +893,51 @@ index 781ff3d..a699446 100644
 +                         &&LDRB_REG_INST,
 +                         &&LDM_FAST_INST,
 +                         &&STM_FAST_INST,
++                         &&MOV_REG_INST,
++                         &&LDR_POST_INST,
++                         &&STR_POST_INST,
++                         &&LDRB_POST_INST,
++                         &&STRB_POST_INST,
++                         &&LDR_PREW_INST,
++                         &&STR_PREW_INST,
++                         &&LDRB_PREW_INST,
++                         &&STRB_PREW_INST,
++                         &&ADD_IMM_AL_INST,
++                         &&ADD_REG_AL_INST,
++                         &&SUB_IMM_AL_INST,
++                         &&SUB_REG_AL_INST,
++                         &&CMP_IMM_AL_INST,
++                         &&CMP_REG_AL_INST,
++                         &&MOV_IMM_AL_INST,
++                         &&LDR_IMM_AL_INST,
++                         &&LDR_LIT_AL_INST,
++                         &&STR_IMM_AL_INST,
++                         &&LDRB_IMM_AL_INST,
++                         &&STRB_IMM_AL_INST,
++                         &&ADD_SH_AL_INST,
++                         &&SUB_SH_AL_INST,
++                         &&CMP_SH_AL_INST,
++                         &&MOV_SH_AL_INST,
++                         &&ORR_SH_AL_INST,
++                         &&AND_IMM_AL_INST,
++                         &&ORR_IMM_AL_INST,
++                         &&RSB_IMM_AL_INST,
++                         &&LDR_REG_AL_INST,
++                         &&STR_REG_AL_INST,
++                         &&LDRB_REG_AL_INST,
++                         &&LDM_FAST_AL_INST,
++                         &&STM_FAST_AL_INST,
++                         &&MOV_REG_AL_INST,
++                         &&LDR_POST_AL_INST,
++                         &&STR_POST_AL_INST,
++                         &&LDRB_POST_AL_INST,
++                         &&STRB_POST_AL_INST,
++                         &&LDR_PREW_AL_INST,
++                         &&STR_PREW_AL_INST,
++                         &&LDRB_PREW_AL_INST,
++                         &&STRB_PREW_AL_INST,
++                         &&B_AL_INST,
++                         &&BL_AL_INST,
                           &&DISPATCH,
                           &&INIT_INST_LENGTH,
                           &&END};
@@ -885,7 +945,7 @@ index 781ff3d..a699446 100644
  #endif
      arm_inst* inst_base;
      unsigned int addr;
-@@ -1632,6 +1788,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1632,6 +1836,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  
      std::size_t ptr;
  
@@ -901,7 +961,7 @@ index 781ff3d..a699446 100644
      LOAD_NZCVT;
  DISPATCH: {
      if (!cpu->NirqSig) {
-@@ -1646,15 +1811,28 @@ DISPATCH: {
+@@ -1646,15 +1859,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -939,7 +999,7 @@ index 781ff3d..a699446 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -1768,17 +1946,40 @@ AND_INST: {
+@@ -1768,17 +1994,40 @@ AND_INST: {
      GOTO_NEXT_INST;
  }
  BBL_INST: {
@@ -984,7 +1044,7 @@ index 781ff3d..a699446 100644
      goto DISPATCH;
  }
  BIC_INST: {
-@@ -1830,6 +2031,8 @@ BLX_INST: {
+@@ -1830,6 +2079,8 @@ BLX_INST: {
              cpu->Reg[14] = (cpu->Reg[15] + cpu->GetInstructionSize());
              if (cpu->TFlag)
                  cpu->Reg[14] |= 0x1;
@@ -993,7 +1053,7 @@ index 781ff3d..a699446 100644
              cpu->Reg[15] = jump_address & 0xfffffffe;
              cpu->TFlag = jump_address & 0x1;
          } else {
-@@ -1869,6 +2072,16 @@ BXJ_INST: {
+@@ -1869,6 +2120,16 @@ BXJ_INST: {
          cpu->TFlag = address & 1;
          cpu->Reg[15] = address & 0xfffffffe;
          INC_PC(sizeof(bx_inst));
@@ -1010,7 +1070,7 @@ index 781ff3d..a699446 100644
          goto DISPATCH;
      }
  
-@@ -2038,7 +2251,7 @@ LDC_INST: {
+@@ -2038,7 +2299,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1019,7 +1079,7 @@ index 781ff3d..a699446 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2278,19 @@ LDM_INST: {
+@@ -2065,19 +2326,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -1051,7 +1111,7 @@ index 781ff3d..a699446 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2338,7 @@ SXTH_INST: {
+@@ -2125,7 +2386,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1060,7 +1120,7 @@ index 781ff3d..a699446 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2359,7 @@ LDR_INST: {
+@@ -2146,7 +2407,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1069,7 +1129,7 @@ index 781ff3d..a699446 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2402,7 @@ UXTAH_INST: {
+@@ -2189,7 +2450,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1078,7 +1138,7 @@ index 781ff3d..a699446 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2414,7 @@ LDRB_INST: {
+@@ -2201,7 +2462,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1087,7 +1147,7 @@ index 781ff3d..a699446 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2435,7 @@ LDRD_INST: {
+@@ -2222,7 +2483,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -1096,7 +1156,7 @@ index 781ff3d..a699446 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2510,7 @@ LDREXD_INST: {
+@@ -2297,7 +2558,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1105,7 +1165,7 @@ index 781ff3d..a699446 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2522,7 @@ LDRH_INST: {
+@@ -2309,7 +2570,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1114,7 +1174,7 @@ index 781ff3d..a699446 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2537,7 @@ LDRSB_INST: {
+@@ -2324,7 +2585,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1123,7 +1183,7 @@ index 781ff3d..a699446 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2553,7 @@ LDRSH_INST: {
+@@ -2340,7 +2601,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1132,7 +1192,7 @@ index 781ff3d..a699446 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3778,7 @@ STM_INST: {
+@@ -3565,7 +3826,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -1141,7 +1201,7 @@ index 781ff3d..a699446 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3806,14 @@ STM_INST: {
+@@ -3593,15 +3854,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -1164,7 +1224,7 @@ index 781ff3d..a699446 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3847,7 @@ SXTB_INST: {
+@@ -3635,7 +3895,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1173,7 +1233,7 @@ index 781ff3d..a699446 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3887,7 @@ UXTAB_INST: {
+@@ -3675,7 +3935,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1182,7 +1242,7 @@ index 781ff3d..a699446 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3899,7 @@ STRB_INST: {
+@@ -3687,7 +3947,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1191,7 +1251,7 @@ index 781ff3d..a699446 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3916,7 @@ STRBT_INST: {
+@@ -3704,7 +3964,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1200,7 +1260,7 @@ index 781ff3d..a699446 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +4017,7 @@ STREXH_INST: {
+@@ -3805,7 +4065,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1209,7 +1269,7 @@ index 781ff3d..a699446 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +4030,7 @@ STRH_INST: {
+@@ -3818,7 +4078,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1218,7 +1278,7 @@ index 781ff3d..a699446 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +4083,17 @@ SUB_INST: {
+@@ -3871,11 +4131,17 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1241,11 +1301,18 @@ index 781ff3d..a699446 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4580,6 +4798,412 @@ YIELD_INST: {
+@@ -4580,17 +4846,1091 @@ YIELD_INST: {
      GOTO_NEXT_INST;
  }
  
-+
+-#define VFP_INTERPRETER_IMPL
+-#include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+-#undef VFP_INTERPRETER_IMPL
+ 
+-END: {
+-    SAVE_NZCVT;
+-    cpu->NumInstrsToExecute = 0;
+-    return num_instrs;
 +// ---- Specialised handlers (SpecializeArmInstruction): ARM mode only, so PC advances by 4, and
 +// no operand or destination is PC. They give the same results as the generic handlers for
 +// these forms, without the shifter call (none of these forms reads the shifter carry).
@@ -1265,9 +1332,12 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
-+}
+ }
+-INIT_INST_LENGTH: {
+-    cpu->NumInstrsToExecute = 0;
+-    return num_instrs;
 +ADD_REG_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        add_inst* const inst_cream = (add_inst*)inst_base->component;
@@ -1284,7 +1354,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +SUB_IMM_INST: {
@@ -1303,7 +1373,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +SUB_REG_INST: {
@@ -1322,7 +1392,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +CMP_IMM_INST: {
@@ -1338,7 +1408,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +CMP_REG_INST: {
@@ -1354,7 +1424,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +MOV_IMM_INST: {
@@ -1364,7 +1434,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(mov_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +LDR_IMM_INST: {
@@ -1374,7 +1444,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +LDR_LIT_INST: {
@@ -1384,7 +1454,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +STR_IMM_INST: {
@@ -1394,7 +1464,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +LDRB_IMM_INST: {
@@ -1404,7 +1474,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +STRB_IMM_INST: {
@@ -1414,7 +1484,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -1434,7 +1504,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +SUB_SH_INST: {
@@ -1453,7 +1523,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +CMP_SH_INST: {
@@ -1469,9 +1539,9 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
-+}
+ }
 +MOV_SH_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
@@ -1479,9 +1549,9 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(mov_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
-+}
+ }
 +ORR_SH_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
@@ -1489,7 +1559,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(orr_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +AND_IMM_INST: {
@@ -1499,7 +1569,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(and_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +ORR_IMM_INST: {
@@ -1509,7 +1579,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(orr_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +RSB_IMM_INST: {
@@ -1528,7 +1598,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(rsb_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +LDR_REG_INST: {
@@ -1541,7 +1611,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +STR_REG_INST: {
@@ -1554,7 +1624,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +LDRB_REG_INST: {
@@ -1567,7 +1637,7 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -1646,28 +1716,699 @@ index 781ff3d..a699446 100644
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
 +
- #define VFP_INTERPRETER_IMPL
- #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
- #undef VFP_INTERPRETER_IMPL
-@@ -4594,3 +5218,7 @@ INIT_INST_LENGTH: {
-     return num_instrs;
- }
- }
++MOV_REG_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = cpu->Reg[inst_cream->shifter_operand];
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_POST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_POST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_POST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STRB_POST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_PREW_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_PREW_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_PREW_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STRB_PREW_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++// Same handlers for instructions without a condition (AL): no condition check.
++ADD_IMM_AL_INST: {
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, inst_cream->shifter_operand, 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++ADD_REG_AL_INST: {
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, cpu->Reg[inst_cream->shifter_operand], 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++SUB_IMM_AL_INST: {
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++SUB_REG_AL_INST: {
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~cpu->Reg[inst_cream->shifter_operand], 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++CMP_IMM_AL_INST: {
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++CMP_REG_AL_INST: {
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(cpu->Reg[inst_cream->shifter_operand]), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++MOV_IMM_AL_INST: {
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_IMM_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_LIT_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_IMM_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_IMM_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STRB_IMM_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++ADD_SH_AL_INST: {
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ShiftedRegister(cpu, inst_cream->shifter_operand), 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++SUB_SH_AL_INST: {
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~ShiftedRegister(cpu, inst_cream->shifter_operand), 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++CMP_SH_AL_INST: {
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~ShiftedRegister(cpu, inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++MOV_SH_AL_INST: {
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = ShiftedRegister(cpu, inst_cream->shifter_operand);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++ORR_SH_AL_INST: {
++    {
++        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
++        RD = RN | ShiftedRegister(cpu, inst_cream->shifter_operand);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(orr_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++AND_IMM_AL_INST: {
++    {
++        and_inst* const inst_cream = (and_inst*)inst_base->component;
++        RD = RN & inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(and_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++ORR_IMM_AL_INST: {
++    {
++        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
++        RD = RN | inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(orr_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++RSB_IMM_AL_INST: {
++    {
++        rsb_inst* const inst_cream = (rsb_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(~RN, inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(rsb_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_REG_AL_INST: {
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_REG_AL_INST: {
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_REG_AL_INST: {
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDM_FAST_AL_INST: {
++    {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            const u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                u32 value;
++                std::memcpy(&value, p, sizeof(value));
++                cpu->Reg[std::countr_zero(list)] = value;
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->Reg[std::countr_zero(list)] = cpu->ReadMemory32(vaddr);
++            }
++        }
++        if (inst_cream->list & 0x8000) {
++            cpu->TFlag = cpu->Reg[15] & 0x1;
++            cpu->Reg[15] &= 0xFFFFFFFE;
++            INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (inst_cream->Rn == 13) { // POP {..., PC}: a return
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
++            goto DISPATCH;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++STM_FAST_AL_INST: {
++    {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const auto value_of = [cpu, base, rn = inst_cream->Rn](u32 i) {
++            return i == rn ? base : i == 15 ? cpu->Reg[15] + 8 : cpu->Reg[i];
++        };
++        u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                const u32 value = value_of(std::countr_zero(list));
++                std::memcpy(p, &value, sizeof(value));
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->WriteMemory32(vaddr, value_of(std::countr_zero(list)));
++            }
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++MOV_REG_AL_INST: {
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = cpu->Reg[inst_cream->shifter_operand];
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_POST_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_POST_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_POST_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STRB_POST_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDR_PREW_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STR_PREW_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++LDRB_PREW_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++STRB_PREW_AL_INST: {
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++// Unconditional B / BL: BBL_INST without the condition and L checks.
++B_AL_INST: {
++    bbl_inst* const inst_cream = (bbl_inst*)inst_base->component;
++    SET_PC;
++    INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // as BBL_INST
++    if (cpu->NirqSig || (cpu->Cpsr & 0x80)) {
++        BlockLink* const link = &inst_cream->link[0];
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = g_dyncom_link.load(std::memory_order_relaxed)
++                                          ? LookupCachedBlock(cpu, cpu->Reg[15])
++                                          : NO_BLOCK;
++            if (block == NO_BLOCK) {
++                goto DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
++    goto DISPATCH;
++}
++BL_AL_INST: {
++    bbl_inst* const inst_cream = (bbl_inst*)inst_base->component;
++    LINK_RTN_ADDR;
++    PushReturn(cpu, cpu->Reg[14], &inst_cream->link[1]); // link[1] is the block at pc + 4
++    SET_PC;
++    INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // as BBL_INST
++    if (cpu->NirqSig || (cpu->Cpsr & 0x80)) {
++        BlockLink* const link = &inst_cream->link[0];
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = g_dyncom_link.load(std::memory_order_relaxed)
++                                          ? LookupCachedBlock(cpu, cpu->Reg[15])
++                                          : NO_BLOCK;
++            if (block == NO_BLOCK) {
++                goto DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
++    goto DISPATCH;
++}
++
++#define VFP_INTERPRETER_IMPL
++#include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
++#undef VFP_INTERPRETER_IMPL
++
++END: {
++    SAVE_NZCVT;
++    cpu->NumInstrsToExecute = 0;
++    return num_instrs;
++}
++INIT_INST_LENGTH: {
++    cpu->NumInstrsToExecute = 0;
++    return num_instrs;
++}
++}
 +
 +#if AZ_DYNCOM_TAILCALL
 +#include "core/arm/dyncom/arm_dyncom_interpreter_tc.inc"
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..2c3d782
+index 0000000..f8e6054
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,4725 @@
+@@ -0,0 +1,5563 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -1814,6 +2555,51 @@ index 0000000..2c3d782
 +static TC_CC unsigned TC_LDRB_REG_INST(TC_ARGS);
 +static TC_CC unsigned TC_LDM_FAST_INST(TC_ARGS);
 +static TC_CC unsigned TC_STM_FAST_INST(TC_ARGS);
++static TC_CC unsigned TC_MOV_REG_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_POST_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_POST_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_POST_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_POST_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_PREW_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_PREW_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_PREW_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_PREW_INST(TC_ARGS);
++static TC_CC unsigned TC_ADD_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_ADD_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_SUB_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_SUB_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_CMP_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_CMP_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_MOV_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_LIT_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_ADD_SH_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_SUB_SH_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_CMP_SH_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_MOV_SH_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_ORR_SH_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_AND_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_ORR_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_RSB_IMM_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDM_FAST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STM_FAST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_MOV_REG_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_POST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_POST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_POST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_POST_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_PREW_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_PREW_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_PREW_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_PREW_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_B_AL_INST(TC_ARGS);
++static TC_CC unsigned TC_BL_AL_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLS_INST(TC_ARGS);
 +static TC_CC unsigned TC_VNMLA_INST(TC_ARGS);
@@ -1849,7 +2635,7 @@ index 0000000..2c3d782
 +static TC_CC unsigned TC_END(TC_ARGS);
 +static TC_CC unsigned TC_INIT_INST_LENGTH(TC_ARGS);
 +
-+static constexpr TcHandler tc_table[230] = {
++static constexpr TcHandler tc_table[275] = {
 +    TC_VMLA_INST,
 +    TC_VMLS_INST,
 +    TC_VNMLA_INST,
@@ -2077,6 +2863,51 @@ index 0000000..2c3d782
 +    TC_LDRB_REG_INST,
 +    TC_LDM_FAST_INST,
 +    TC_STM_FAST_INST,
++    TC_MOV_REG_INST,
++    TC_LDR_POST_INST,
++    TC_STR_POST_INST,
++    TC_LDRB_POST_INST,
++    TC_STRB_POST_INST,
++    TC_LDR_PREW_INST,
++    TC_STR_PREW_INST,
++    TC_LDRB_PREW_INST,
++    TC_STRB_PREW_INST,
++    TC_ADD_IMM_AL_INST,
++    TC_ADD_REG_AL_INST,
++    TC_SUB_IMM_AL_INST,
++    TC_SUB_REG_AL_INST,
++    TC_CMP_IMM_AL_INST,
++    TC_CMP_REG_AL_INST,
++    TC_MOV_IMM_AL_INST,
++    TC_LDR_IMM_AL_INST,
++    TC_LDR_LIT_AL_INST,
++    TC_STR_IMM_AL_INST,
++    TC_LDRB_IMM_AL_INST,
++    TC_STRB_IMM_AL_INST,
++    TC_ADD_SH_AL_INST,
++    TC_SUB_SH_AL_INST,
++    TC_CMP_SH_AL_INST,
++    TC_MOV_SH_AL_INST,
++    TC_ORR_SH_AL_INST,
++    TC_AND_IMM_AL_INST,
++    TC_ORR_IMM_AL_INST,
++    TC_RSB_IMM_AL_INST,
++    TC_LDR_REG_AL_INST,
++    TC_STR_REG_AL_INST,
++    TC_LDRB_REG_AL_INST,
++    TC_LDM_FAST_AL_INST,
++    TC_STM_FAST_AL_INST,
++    TC_MOV_REG_AL_INST,
++    TC_LDR_POST_AL_INST,
++    TC_STR_POST_AL_INST,
++    TC_LDRB_POST_AL_INST,
++    TC_STRB_POST_AL_INST,
++    TC_LDR_PREW_AL_INST,
++    TC_STR_PREW_AL_INST,
++    TC_LDRB_PREW_AL_INST,
++    TC_STRB_PREW_AL_INST,
++    TC_B_AL_INST,
++    TC_BL_AL_INST,
 +    TC_DISPATCH,
 +    TC_INIT_INST_LENGTH,
 +    TC_END,
@@ -5275,7 +6106,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5296,7 +6127,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5317,7 +6148,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5338,7 +6169,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5356,7 +6187,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5374,7 +6205,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5386,7 +6217,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(mov_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5398,7 +6229,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5410,7 +6241,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5422,7 +6253,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5434,7 +6265,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5446,7 +6277,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5467,7 +6298,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(add_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5488,7 +6319,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(sub_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5506,7 +6337,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(cmp_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5518,7 +6349,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(mov_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5530,7 +6361,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(orr_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5542,7 +6373,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(and_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5554,7 +6385,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(orr_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5575,7 +6406,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(rsb_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5590,7 +6421,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5605,7 +6436,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5620,7 +6451,7 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
-+    FETCH_INST;
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
 +}
 +
@@ -5698,8 +6529,756 @@ index 0000000..2c3d782
 +    }
 +    cpu->Reg[15] += 4;
 +    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_MOV_REG_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = cpu->Reg[inst_cream->shifter_operand];
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_POST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_POST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_POST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_POST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_PREW_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_PREW_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_PREW_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_PREW_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ADD_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, inst_cream->shifter_operand, 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ADD_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, cpu->Reg[inst_cream->shifter_operand], 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_SUB_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_SUB_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~cpu->Reg[inst_cream->shifter_operand], 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_CMP_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_CMP_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(cpu->Reg[inst_cream->shifter_operand]), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_MOV_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_LIT_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ADD_SH_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ShiftedRegister(cpu, inst_cream->shifter_operand), 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_SUB_SH_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~ShiftedRegister(cpu, inst_cream->shifter_operand), 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_CMP_SH_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~ShiftedRegister(cpu, inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_MOV_SH_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = ShiftedRegister(cpu, inst_cream->shifter_operand);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ORR_SH_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
++        RD = RN | ShiftedRegister(cpu, inst_cream->shifter_operand);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(orr_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_AND_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        and_inst* const inst_cream = (and_inst*)inst_base->component;
++        RD = RN & inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(and_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ORR_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
++        RD = RN | inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(orr_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_RSB_IMM_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        rsb_inst* const inst_cream = (rsb_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(~RN, inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(rsb_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_reg_inst* const inst_cream = (const ldst_reg_inst*)inst_base->component;
++        const u32 offset = cpu->Reg[inst_cream->Rm] << inst_cream->shift;
++        const u32 vaddr = inst_cream->subtract ? cpu->Reg[inst_cream->Rn] - offset
++                                               : cpu->Reg[inst_cream->Rn] + offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDM_FAST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            const u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                u32 value;
++                std::memcpy(&value, p, sizeof(value));
++                cpu->Reg[std::countr_zero(list)] = value;
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->Reg[std::countr_zero(list)] = cpu->ReadMemory32(vaddr);
++            }
++        }
++        if (inst_cream->list & 0x8000) {
++            cpu->TFlag = cpu->Reg[15] & 0x1;
++            cpu->Reg[15] &= 0xFFFFFFFE;
++            INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (inst_cream->Rn == 13) { // POP {..., PC}: a return
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
++            TC_GOTO_DISPATCH;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
 +    FETCH_INST;
 +    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STM_FAST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const auto value_of = [cpu, base, rn = inst_cream->Rn](u32 i) {
++            return i == rn ? base : i == 15 ? cpu->Reg[15] + 8 : cpu->Reg[i];
++        };
++        u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                const u32 value = value_of(std::countr_zero(list));
++                std::memcpy(p, &value, sizeof(value));
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->WriteMemory32(vaddr, value_of(std::countr_zero(list)));
++            }
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_MOV_REG_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = cpu->Reg[inst_cream->shifter_operand];
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_POST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_POST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_POST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_POST_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn];
++        cpu->Reg[inst_cream->Rn] = vaddr + inst_cream->offset;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_PREW_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_PREW_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory32(vaddr, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_PREW_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(vaddr);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_PREW_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        const u32 vaddr = cpu->Reg[inst_cream->Rn] + inst_cream->offset;
++        cpu->Reg[inst_cream->Rn] = vaddr;
++        cpu->WriteMemory8(vaddr, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_B_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    bbl_inst* const inst_cream = (bbl_inst*)inst_base->component;
++    SET_PC;
++    INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // as BBL_INST
++    if (cpu->NirqSig || (cpu->Cpsr & 0x80)) {
++        BlockLink* const link = &inst_cream->link[0];
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = g_dyncom_link.load(std::memory_order_relaxed)
++                                          ? LookupCachedBlock(cpu, cpu->Reg[15])
++                                          : NO_BLOCK;
++            if (block == NO_BLOCK) {
++                TC_GOTO_DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
++    TC_GOTO_DISPATCH;
++}
++
++static TC_CC unsigned TC_BL_AL_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    bbl_inst* const inst_cream = (bbl_inst*)inst_base->component;
++    LINK_RTN_ADDR;
++    PushReturn(cpu, cpu->Reg[14], &inst_cream->link[1]); // link[1] is the block at pc + 4
++    SET_PC;
++    INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // as BBL_INST
++    if (cpu->NirqSig || (cpu->Cpsr & 0x80)) {
++        BlockLink* const link = &inst_cream->link[0];
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = g_dyncom_link.load(std::memory_order_relaxed)
++                                          ? LookupCachedBlock(cpu, cpu->Reg[15])
++                                          : NO_BLOCK;
++            if (block == NO_BLOCK) {
++                TC_GOTO_DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
++    TC_GOTO_DISPATCH;
 +}
 +
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS) {
@@ -6394,7 +7973,7 @@ index 0000000..2c3d782
 +#undef TC_GOTO_DISPATCH
 +#undef TC_GOTO_END
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
-index 729c407..072c964 100644
+index 729c407..78e6956 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
 @@ -1,4 +1,6 @@
@@ -6449,13 +8028,30 @@ index 729c407..072c964 100644
  
      return inst_base;
  }
-@@ -2016,3 +2049,132 @@ const transop_fp_t arm_instruction_trans[] = {
+@@ -2016,3 +2049,169 @@ const transop_fp_t arm_instruction_trans[] = {
  };
  
  const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / sizeof(transop_fp_t);
 +static_assert(sizeof(arm_instruction_trans) / sizeof(transop_fp_t) == SPECIAL_INST_BASE);
 +
++static void SpecializeForm(arm_inst* inst_base, u32 inst, u32 pc);
++
 +void SpecializeArmInstruction(arm_inst* inst_base, u32 inst, u32 pc) {
++    if (arm_instruction_trans[inst_base->idx] == INTERPRETER_TRANSLATE(bbl)) {
++        if (inst_base->cond == ConditionCode::AL)
++            inst_base->idx = BIT(inst, 24) ? BL_AL_IDX : B_AL_IDX;
++        return;
++    }
++    if (((pc + 4) & 0xfff) == 0) // the block ends here (END_OF_PAGE), see above
++        return;
++    SpecializeForm(inst_base, inst, pc);
++    if (inst_base->idx >= SPECIAL_INST_BASE && inst_base->idx < SPECIAL_AL_BASE &&
++        inst_base->cond == ConditionCode::AL) {
++        inst_base->idx += SPECIAL_AL_BASE - SPECIAL_INST_BASE;
++    }
++}
++
++static void SpecializeForm(arm_inst* inst_base, u32 inst, u32 pc) {
 +    const transop_fp_t op = arm_instruction_trans[inst_base->idx];
 +    const u32 Rn = BITS(inst, 16, 19);
 +    const u32 Rd = BITS(inst, 12, 15);
@@ -6480,7 +8076,7 @@ index 729c407..072c964 100644
 +        u32* shifter_operand;
 +        if (op == INTERPRETER_TRANSLATE(cmp))
 +            shifter_operand = &((cmp_inst*)inst_base->component)->shifter_operand;
-+        else if (op == INTERPRETER_TRANSLATE(mov))
++        else if (op == INTERPRETER_TRANSLATE(mov) || op == INTERPRETER_TRANSLATE(cpy))
 +            shifter_operand = &((mov_inst*)inst_base->component)->shifter_operand;
 +        else
 +            shifter_operand = &((add_inst*)inst_base->component)->shifter_operand;
@@ -6516,6 +8112,9 @@ index 729c407..072c964 100644
 +            set(MOV_IMM_IDX, imm_val);
 +        else if (shifted_reg)
 +            set(MOV_SH_IDX, shifted_operand);
++    } else if (op == INTERPRETER_TRANSLATE(cpy)) {
++        if (!S && plain_reg && Rd != 15)
++            set(MOV_REG_IDX, Rm);
 +    } else if (op == INTERPRETER_TRANSLATE(orr) || op == INTERPRETER_TRANSLATE(and)) {
 +        // ANDS/ORRS set C from the shifter: left generic.
 +        if (S || Rn == 15 || Rd == 15)
@@ -6545,10 +8144,27 @@ index 729c407..072c964 100644
 +    } else if (op == INTERPRETER_TRANSLATE(ldr) || op == INTERPRETER_TRANSLATE(ldrcond) ||
 +               op == INTERPRETER_TRANSLATE(str) || op == INTERPRETER_TRANSLATE(ldrb) ||
 +               op == INTERPRETER_TRANSLATE(strb)) {
-+        // Offset addressing, no writeback: P = 1, W = 0.
-+        if (!BIT(inst, 24) || BIT(inst, 21) || Rd == 15)
++        if (Rd == 15)
 +            return;
 +        const bool load_word = op == INTERPRETER_TRANSLATE(ldr) || op == INTERPRETER_TRANSLATE(ldrcond);
++        const unsigned kind = load_word                             ? 0
++                              : op == INTERPRETER_TRANSLATE(str)  ? 1
++                              : op == INTERPRETER_TRANSLATE(ldrb) ? 2
++                                                                  : 3;
++        // Immediate offset with writeback (I = 0): post-indexed (P = 0, W = 0; W = 1 is the T
++        // form) or pre-indexed (P = 1, W = 1). Rd == Rn is unpredictable: left generic.
++        if (!BIT(inst, 25) && BIT(inst, 24) == BIT(inst, 21)) {
++            if (Rn == 15 || Rd == Rn)
++                return;
++            const u32 off = BITS(inst, 0, 11);
++            ldst_imm_inst* cream = (ldst_imm_inst*)inst_base->component;
++            *cream = {Rn, Rd, BIT(inst, 23) ? off : 0u - off};
++            inst_base->idx = (BIT(inst, 24) ? LDR_PREW_IDX : LDR_POST_IDX) + kind;
++            return;
++        }
++        // Offset addressing, no writeback: P = 1, W = 0.
++        if (!BIT(inst, 24) || BIT(inst, 21))
++            return;
 +        if (BIT(inst, 25)) {
 +            // Register offset, LSL #0-31 only (I = 1, bit 4 = 0, type = 0).
 +            if (BIT(inst, 4) || shift_type != 0 || Rm == 15 || Rn == 15 ||
@@ -6583,7 +8199,7 @@ index 729c407..072c964 100644
 +    }
 +}
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.h b/src/core/arm/dyncom/arm_dyncom_trans.h
-index e67df42..79be3cc 100644
+index e67df42..459ee52 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.h
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.h
 @@ -4,6 +4,7 @@
@@ -6614,7 +8230,7 @@ index e67df42..79be3cc 100644
  };
  
  struct bx_inst {
-@@ -493,6 +502,82 @@ typedef ARM_INST_PTR (*transop_fp_t)(unsigned int, int);
+@@ -493,6 +502,102 @@ typedef ARM_INST_PTR (*transop_fp_t)(unsigned int, int);
  extern const transop_fp_t arm_instruction_trans[];
  extern const std::size_t arm_instruction_trans_len;
  
@@ -6648,6 +8264,23 @@ index e67df42..79be3cc 100644
 +    LDRB_REG_IDX,
 +    LDM_IDX,                         // LDM{IA,IB,DA,DB} Rn{!}, {list}  (no ^), Rn != PC
 +    STM_IDX,                         // STM{IA,IB,DA,DB} Rn{!}, {list}  (no ^), Rn != PC
++    MOV_REG_IDX,                     // MOV Rd, Rm                 (no S)
++    // Immediate offset with writeback, Rd != Rn: post-indexed [Rn], #+-imm and pre-indexed
++    // [Rn, #+-imm]!.
++    LDR_POST_IDX,
++    STR_POST_IDX,
++    LDRB_POST_IDX,
++    STRB_POST_IDX,
++    LDR_PREW_IDX,
++    STR_PREW_IDX,
++    LDRB_PREW_IDX,
++    STRB_PREW_IDX,
++    // The same handlers for unconditional (AL) instructions, in the same order.
++    SPECIAL_AL_BASE,
++    SPECIAL_AL_END = SPECIAL_AL_BASE + (SPECIAL_AL_BASE - SPECIAL_INST_BASE),
++    // Unconditional B and BL (conditional ones stay on the generic BBL handler).
++    B_AL_IDX = SPECIAL_AL_END,
++    BL_AL_IDX,
 +    SPECIAL_INST_END
 +};
 +
@@ -6679,6 +8312,9 @@ index e67df42..79be3cc 100644
 +
 +/// After an ARM-mode (not Thumb) instruction at pc is translated: switch it to a specialised
 +/// handler when it has one of the forms above. The generic handler stays for everything else.
++/// The specialised handlers (except LDM/STM) do not check whether the block ends after them, so
++/// this leaves out the last instruction of a page (a block ends there) and must not be used for
++/// single-step translations.
 +void SpecializeArmInstruction(arm_inst* inst_base, u32 inst, u32 pc);
 +
 +/// Bumped by debug switches that change translation; every core clears its block cache at its
