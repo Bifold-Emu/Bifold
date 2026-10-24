@@ -208,6 +208,9 @@ int az_debug_dyncom_tailcall(int set);
 /// Debug: whether direct branches link straight to their target block (1, default) or always go
 /// through the dispatch lookup (0); `set` 0 or 1 changes it at once, -1 only reads it.
 int az_debug_dyncom_link(int set);
+/// Debug: whether common ARM instruction forms get specialised handlers (1, default) or all use
+/// the generic ones (0); changing it makes every core retranslate. -1 only reads it.
+int az_debug_dyncom_special(int set);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the

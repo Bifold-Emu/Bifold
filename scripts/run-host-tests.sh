@@ -43,6 +43,14 @@ NAME="input reaches HID";    check "$T" input
 mkdir -p "$TMP/dump"
 NAME="framebuffer output";   check env AZ_TEST_DUMP="$TMP/dump" "$T" boot "$ELF/paint.elf" 2 0
 NAME="frame dumped";         check test -s "$TMP/dump/top.ppm"
+# alu.elf draws a hash of ADD/SUB/CMP/MOV/LDR/STR results and flags: the interpreter with and
+# without its specialised handlers, and the JIT, must draw the same frame.
+mkdir -p "$TMP/alu1" "$TMP/alu0" "$TMP/aluj"
+AZ_TEST_DUMP="$TMP/alu1" "$T" boot "$ELF/alu.elf" 3 0 >/dev/null 2>&1 || true
+AZ_DYNCOM_NO_SPECIAL=1 AZ_TEST_DUMP="$TMP/alu0" "$T" boot "$ELF/alu.elf" 3 0 >/dev/null 2>&1 || true
+AZ_TEST_DUMP="$TMP/aluj" "$T" boot "$ELF/alu.elf" 3 1 >/dev/null 2>&1 || true
+NAME="interpreter: specialised = generic"; check cmp "$TMP/alu1/top.ppm" "$TMP/alu0/top.ppm"
+NAME="interpreter = JIT (alu.elf)";        check cmp "$TMP/alu1/top.ppm" "$TMP/aluj/top.ppm"
 NAME="save state + 3 loads";  check "$T" savestate "$ELF/paint.elf"
 NAME="screenshot (software renderer)"; check sh -c "AZ_TEST_SHOT='$TMP/shot.png' '$T' boot '$ELF/paint.elf' 2 0 | grep -q screenshot=1 && head -c 4 '$TMP/shot.png' | od -An -tx1 | grep -q '89 50 4e 47'"
 

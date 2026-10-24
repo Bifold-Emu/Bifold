@@ -372,7 +372,7 @@ index 7453326..276183c 100644
      // Multi-process state
      config.processor_id = GetID();
 diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
-index d1a6c38..75f452f 100644
+index d1a6c38..b99fa2a 100644
 --- a/src/core/arm/dyncom/arm_dyncom.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom.cpp
 @@ -2,6 +2,7 @@
@@ -434,11 +434,25 @@ index d1a6c38..75f452f 100644
      ClearInstructionCache();
  }
  
+@@ -103,6 +119,13 @@ void ARM_DynCom::SetCP15Register(CP15Register reg, u32 value) {
+ }
+ 
+ void ARM_DynCom::ExecuteInstructions(u64 num_instructions) {
++    // A debug switch that changes how blocks are translated asks every core to drop its blocks;
++    // each does so here, on its own thread.
++    if (const u32 epoch = g_dyncom_flush_epoch.load(std::memory_order_relaxed);
++        epoch != flush_epoch) [[unlikely]] {
++        flush_epoch = epoch;
++        state->ClearBlockCache();
++    }
+     state->NumInstrsToExecute = num_instructions;
+     const u32 ticks_executed = InterpreterMainLoop(state.get());
+     if (timer) {
 diff --git a/src/core/arm/dyncom/arm_dyncom.h b/src/core/arm/dyncom/arm_dyncom.h
-index 47d2606..6637e22 100644
+index 47d2606..9625528 100644
 --- a/src/core/arm/dyncom/arm_dyncom.h
 +++ b/src/core/arm/dyncom/arm_dyncom.h
-@@ -63,6 +63,10 @@ private:
+@@ -63,6 +63,11 @@ private:
  
      Core::System& system;
      std::unique_ptr<ARMul_State> state;
@@ -446,11 +460,12 @@ index 47d2606..6637e22 100644
 +    /// times a frame, and only a different table needs the cache cleared.
 +    std::weak_ptr<Memory::PageTable> cache_page_table;
 +    bool clear_on_switch = false; ///< AZ_CLEAR_ON_SWITCH: old behaviour, for A/B measurements
++    u32 flush_epoch = 0;          ///< last g_dyncom_flush_epoch this core acted on
  };
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..f9f90dc 100644
+index 781ff3d..1275263 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,10 @@
@@ -685,7 +700,30 @@ index 781ff3d..f9f90dc 100644
  shtop_fp_t GetShifterOp(unsigned int inst) {
      if (BIT(inst, 25)) {
          return DPO(Immediate);
-@@ -847,6 +874,7 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+@@ -813,6 +840,11 @@ enum { KEEP_GOING, FETCH_EXCEPTION };
+ 
+ MICROPROFILE_DEFINE(DynCom_Decode, "DynCom", "Decode", MP_RGB(255, 64, 64));
+ 
++// Specialised handlers for common ARM forms (SpecializeArmInstruction): on by default;
++// AZ_DYNCOM_NO_SPECIAL=1 (or az_debug_dyncom_special(0)) keeps every instruction generic.
++// Changing it affects blocks translated afterwards (the switch clears the block cache).
++std::atomic<bool> g_dyncom_special{std::getenv("AZ_DYNCOM_NO_SPECIAL") == nullptr};
++
+ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, const u32 phys_addr,
+                                                     ARM_INST_PTR& inst_base) {
+     u32 inst_size = 4;
+@@ -841,12 +873,18 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+         CITRA_IGNORE_EXIT(-1);
+     }
+     inst_base = arm_instruction_trans[idx](inst, idx);
++#if defined __GNUC__ || defined __clang__ // the switch fallback has no specialised handlers
++    if (!cpu->TFlag && g_dyncom_special.load(std::memory_order_relaxed)) {
++        SpecializeArmInstruction(inst_base, inst, phys_addr);
++    }
++#endif
+ 
+     return inst_size;
+ }
  
  static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
      MICROPROFILE_SCOPE(DynCom_Decode);
@@ -693,7 +731,7 @@ index 781ff3d..f9f90dc 100644
  
      // Decode instruction, get index
      // Allocate memory and init InsCream
-@@ -876,6 +904,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+@@ -876,6 +914,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
  
  static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
      MICROPROFILE_SCOPE(DynCom_Decode);
@@ -701,7 +739,7 @@ index 781ff3d..f9f90dc 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -921,9 +950,54 @@ static int clz(unsigned int x) {
+@@ -921,9 +960,54 @@ static int clz(unsigned int x) {
  
  MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
  
@@ -756,7 +794,7 @@ index 781ff3d..f9f90dc 100644
  #ifdef ENABLE_GDBSTUB
      /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
      GDBStub::BreakpointAddress breakpoint_data;
-@@ -946,7 +1020,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -946,7 +1030,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -765,7 +803,30 @@ index 781ff3d..f9f90dc 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1632,6 +1706,13 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1622,9 +1706,22 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+                          &&BL_1_THUMB,
+                          &&BL_2_THUMB,
+                          &&BLX_1_THUMB,
++                         &&ADD_IMM_INST,
++                         &&ADD_REG_INST,
++                         &&SUB_IMM_INST,
++                         &&SUB_REG_INST,
++                         &&CMP_IMM_INST,
++                         &&CMP_REG_INST,
++                         &&MOV_IMM_INST,
++                         &&LDR_IMM_INST,
++                         &&LDR_LIT_INST,
++                         &&STR_IMM_INST,
++                         &&LDRB_IMM_INST,
++                         &&STRB_IMM_INST,
+                          &&DISPATCH,
+                          &&INIT_INST_LENGTH,
+                          &&END};
++    static_assert(sizeof(InstLabel) / sizeof(InstLabel[0]) == SPECIAL_INST_END + 3);
+ #endif
+     arm_inst* inst_base;
+     unsigned int addr;
+@@ -1632,6 +1729,13 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  
      std::size_t ptr;
  
@@ -779,7 +840,7 @@ index 781ff3d..f9f90dc 100644
      LOAD_NZCVT;
  DISPATCH: {
      if (!cpu->NirqSig) {
-@@ -1646,15 +1727,28 @@ DISPATCH: {
+@@ -1646,15 +1750,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -817,7 +878,7 @@ index 781ff3d..f9f90dc 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -1768,17 +1862,36 @@ AND_INST: {
+@@ -1768,17 +1885,36 @@ AND_INST: {
      GOTO_NEXT_INST;
  }
  BBL_INST: {
@@ -858,7 +919,7 @@ index 781ff3d..f9f90dc 100644
      goto DISPATCH;
  }
  BIC_INST: {
-@@ -2038,7 +2151,7 @@ LDC_INST: {
+@@ -2038,7 +2174,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -867,7 +928,7 @@ index 781ff3d..f9f90dc 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2178,19 @@ LDM_INST: {
+@@ -2065,19 +2201,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -899,7 +960,7 @@ index 781ff3d..f9f90dc 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2238,7 @@ SXTH_INST: {
+@@ -2125,7 +2261,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -908,7 +969,7 @@ index 781ff3d..f9f90dc 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2259,7 @@ LDR_INST: {
+@@ -2146,7 +2282,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -917,7 +978,7 @@ index 781ff3d..f9f90dc 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2302,7 @@ UXTAH_INST: {
+@@ -2189,7 +2325,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -926,7 +987,7 @@ index 781ff3d..f9f90dc 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2314,7 @@ LDRB_INST: {
+@@ -2201,7 +2337,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -935,7 +996,7 @@ index 781ff3d..f9f90dc 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2335,7 @@ LDRD_INST: {
+@@ -2222,7 +2358,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -944,7 +1005,7 @@ index 781ff3d..f9f90dc 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2410,7 @@ LDREXD_INST: {
+@@ -2297,7 +2433,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -953,7 +1014,7 @@ index 781ff3d..f9f90dc 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2422,7 @@ LDRH_INST: {
+@@ -2309,7 +2445,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -962,7 +1023,7 @@ index 781ff3d..f9f90dc 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2437,7 @@ LDRSB_INST: {
+@@ -2324,7 +2460,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -971,7 +1032,7 @@ index 781ff3d..f9f90dc 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2453,7 @@ LDRSH_INST: {
+@@ -2340,7 +2476,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -980,7 +1041,7 @@ index 781ff3d..f9f90dc 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3678,7 @@ STM_INST: {
+@@ -3565,7 +3701,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -989,7 +1050,7 @@ index 781ff3d..f9f90dc 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3706,14 @@ STM_INST: {
+@@ -3593,15 +3729,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -1012,7 +1073,7 @@ index 781ff3d..f9f90dc 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3747,7 @@ SXTB_INST: {
+@@ -3635,7 +3770,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1021,7 +1082,7 @@ index 781ff3d..f9f90dc 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3787,7 @@ UXTAB_INST: {
+@@ -3675,7 +3810,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1030,7 +1091,7 @@ index 781ff3d..f9f90dc 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3799,7 @@ STRB_INST: {
+@@ -3687,7 +3822,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1039,7 +1100,7 @@ index 781ff3d..f9f90dc 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3816,7 @@ STRBT_INST: {
+@@ -3704,7 +3839,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1048,7 +1109,7 @@ index 781ff3d..f9f90dc 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3917,7 @@ STREXH_INST: {
+@@ -3805,7 +3940,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1057,7 +1118,7 @@ index 781ff3d..f9f90dc 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3930,7 @@ STRH_INST: {
+@@ -3818,7 +3953,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1066,7 +1127,7 @@ index 781ff3d..f9f90dc 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +3983,16 @@ SUB_INST: {
+@@ -3871,11 +4006,16 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1088,7 +1149,187 @@ index 781ff3d..f9f90dc 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4594,3 +4711,7 @@ INIT_INST_LENGTH: {
+@@ -4580,6 +4720,179 @@ YIELD_INST: {
+     GOTO_NEXT_INST;
+ }
+ 
++
++// ---- Specialised handlers (SpecializeArmInstruction): ARM mode only, so PC advances by 4, and
++// no operand or destination is PC. They give the same results as the generic handlers for
++// these forms, without the shifter call (none of these forms reads the shifter carry).
++ADD_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, inst_cream->shifter_operand, 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++ADD_REG_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, cpu->Reg[inst_cream->shifter_operand], 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++SUB_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++SUB_REG_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~cpu->Reg[inst_cream->shifter_operand], 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++CMP_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++CMP_REG_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(cpu->Reg[inst_cream->shifter_operand]), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++MOV_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++LDR_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++LDR_LIT_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++STR_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++LDRB_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++STRB_IMM_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
+ #define VFP_INTERPRETER_IMPL
+ #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+ #undef VFP_INTERPRETER_IMPL
+@@ -4594,3 +4907,7 @@ INIT_INST_LENGTH: {
      return num_instrs;
  }
  }
@@ -1098,10 +1339,10 @@ index 781ff3d..f9f90dc 100644
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..2c42c33
+index 0000000..449660b
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,4214 @@
+@@ -0,0 +1,4430 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -1223,6 +1464,18 @@ index 0000000..2c42c33
 +static TC_CC unsigned TC_WFE_INST(TC_ARGS);
 +static TC_CC unsigned TC_WFI_INST(TC_ARGS);
 +static TC_CC unsigned TC_YIELD_INST(TC_ARGS);
++static TC_CC unsigned TC_ADD_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_ADD_REG_INST(TC_ARGS);
++static TC_CC unsigned TC_SUB_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_SUB_REG_INST(TC_ARGS);
++static TC_CC unsigned TC_CMP_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_CMP_REG_INST(TC_ARGS);
++static TC_CC unsigned TC_MOV_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_LDR_LIT_INST(TC_ARGS);
++static TC_CC unsigned TC_STR_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_LDRB_IMM_INST(TC_ARGS);
++static TC_CC unsigned TC_STRB_IMM_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLS_INST(TC_ARGS);
 +static TC_CC unsigned TC_VNMLA_INST(TC_ARGS);
@@ -1258,7 +1511,7 @@ index 0000000..2c42c33
 +static TC_CC unsigned TC_END(TC_ARGS);
 +static TC_CC unsigned TC_INIT_INST_LENGTH(TC_ARGS);
 +
-+static constexpr TcHandler tc_table[205] = {
++static constexpr TcHandler tc_table[217] = {
 +    TC_VMLA_INST,
 +    TC_VMLS_INST,
 +    TC_VNMLA_INST,
@@ -1461,6 +1714,18 @@ index 0000000..2c42c33
 +    TC_BL_1_THUMB,
 +    TC_BL_2_THUMB,
 +    TC_BLX_1_THUMB,
++    TC_ADD_IMM_INST,
++    TC_ADD_REG_INST,
++    TC_SUB_IMM_INST,
++    TC_SUB_REG_INST,
++    TC_CMP_IMM_INST,
++    TC_CMP_REG_INST,
++    TC_MOV_IMM_INST,
++    TC_LDR_IMM_INST,
++    TC_LDR_LIT_INST,
++    TC_STR_IMM_INST,
++    TC_LDRB_IMM_INST,
++    TC_STRB_IMM_INST,
 +    TC_DISPATCH,
 +    TC_INIT_INST_LENGTH,
 +    TC_END,
@@ -4625,6 +4890,198 @@ index 0000000..2c42c33
 +    GOTO_NEXT_INST;
 +}
 +
++static TC_CC unsigned TC_ADD_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, inst_cream->shifter_operand, 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_ADD_REG_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        add_inst* const inst_cream = (add_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, cpu->Reg[inst_cream->shifter_operand], 0, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(add_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_SUB_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~inst_cream->shifter_operand, 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_SUB_REG_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        sub_inst* const inst_cream = (sub_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~cpu->Reg[inst_cream->shifter_operand], 1, &carry, &overflow);
++        RD = result;
++        if (inst_cream->S) {
++            UPDATE_NFLAG(result);
++            UPDATE_ZFLAG(result);
++            cpu->CFlag = carry;
++            cpu->VFlag = overflow;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(sub_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_CMP_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(inst_cream->shifter_operand), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_CMP_REG_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
++        bool carry;
++        bool overflow;
++        const u32 result = AddWithCarry(RN, ~(cpu->Reg[inst_cream->shifter_operand]), 1, &carry, &overflow);
++        UPDATE_NFLAG(result);
++        UPDATE_ZFLAG(result);
++        cpu->CFlag = carry;
++        cpu->VFlag = overflow;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(cmp_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_MOV_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
++        RD = inst_cream->shifter_operand;
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(mov_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDR_LIT_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory32(inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STR_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory32(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd]);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_LDRB_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->Reg[inst_cream->Rd] = cpu->ReadMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STRB_IMM_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
++        cpu->WriteMemory8(cpu->Reg[inst_cream->Rn] + inst_cream->offset, cpu->Reg[inst_cream->Rd] & 0xff);
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS) {
 +    [[maybe_unused]] unsigned int addr;
 +    if ((inst_base->cond == ConditionCode::AL) || CondPassed(cpu, inst_base->cond)) {
@@ -5317,19 +5774,22 @@ index 0000000..2c42c33
 +#undef TC_GOTO_DISPATCH
 +#undef TC_GOTO_END
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
-index 729c407..6b4d3da 100644
+index 729c407..d31b38e 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
++#include <bit>
  #include <cstdlib>
 +#include <vector>
  #include "common/assert.h"
  #include "common/common_types.h"
  #include "core/arm/dyncom/arm_dyncom_trans.h"
-@@ -9,6 +10,34 @@
+@@ -8,6 +10,35 @@
+ 
  char trans_cache_buf[TRANS_CACHE_SIZE];
  size_t trans_cache_buf_top = 0;
- 
++std::atomic<u32> g_dyncom_flush_epoch{0};
++
 +namespace {
 +std::vector<ARMul_State*> trans_cache_users;
 +// A block ends at a branch or a page boundary: at most 2048 Thumb instructions, each well under
@@ -5357,11 +5817,10 @@ index 729c407..6b4d3da 100644
 +    }
 +    trans_cache_buf_top = 0;
 +}
-+
+ 
  static void* AllocBuffer(std::size_t size) {
      std::size_t start = trans_cache_buf_top;
-     trans_cache_buf_top += size;
-@@ -99,6 +128,8 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(bbl)(unsigned int inst, int index) {
+@@ -99,6 +130,8 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(bbl)(unsigned int inst, int index) {
  
      inst_cream->L = BIT(inst, 24);
      inst_cream->signed_immed_24 = BIT(inst, 23) ? NEGBRANCH : POSBRANCH;
@@ -5370,11 +5829,84 @@ index 729c407..6b4d3da 100644
  
      return inst_base;
  }
+@@ -2016,3 +2049,64 @@ const transop_fp_t arm_instruction_trans[] = {
+ };
+ 
+ const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / sizeof(transop_fp_t);
++static_assert(sizeof(arm_instruction_trans) / sizeof(transop_fp_t) == SPECIAL_INST_BASE);
++
++void SpecializeArmInstruction(arm_inst* inst_base, u32 inst, u32 pc) {
++    const transop_fp_t op = arm_instruction_trans[inst_base->idx];
++    const u32 Rn = BITS(inst, 16, 19);
++    const u32 Rd = BITS(inst, 12, 15);
++    const u32 Rm = BITS(inst, 0, 3);
++    const bool imm = BIT(inst, 25);
++    // Register operand with no shift (LSL #0): bits 11-4 clear.
++    const bool plain_reg = !imm && BITS(inst, 4, 11) == 0 && Rm != 15;
++    const u32 rot = BITS(inst, 8, 11) * 2;
++    const u32 imm_val = std::rotr(BITS(inst, 0, 7), static_cast<int>(rot));
++
++    if (op == INTERPRETER_TRANSLATE(add) || op == INTERPRETER_TRANSLATE(sub)) {
++        const bool add = op == INTERPRETER_TRANSLATE(add);
++        static_assert(sizeof(add_inst) == sizeof(sub_inst));
++        add_inst* cream = (add_inst*)inst_base->component; // same layout as sub_inst
++        if (Rn == 15 || Rd == 15 || !(imm || plain_reg))
++            return;
++        cream->shifter_operand = imm ? imm_val : Rm;
++        inst_base->idx = add ? (imm ? ADD_IMM_IDX : ADD_REG_IDX) : (imm ? SUB_IMM_IDX : SUB_REG_IDX);
++    } else if (op == INTERPRETER_TRANSLATE(cmp)) {
++        cmp_inst* cream = (cmp_inst*)inst_base->component;
++        if (Rn == 15 || !(imm || plain_reg))
++            return;
++        cream->shifter_operand = imm ? imm_val : Rm;
++        inst_base->idx = imm ? CMP_IMM_IDX : CMP_REG_IDX;
++    } else if (op == INTERPRETER_TRANSLATE(mov)) {
++        mov_inst* cream = (mov_inst*)inst_base->component;
++        if (!imm || BIT(inst, 20) || Rd == 15) // MOVS needs the shifter carry
++            return;
++        cream->shifter_operand = imm_val;
++        inst_base->idx = MOV_IMM_IDX;
++    } else if (op == INTERPRETER_TRANSLATE(ldr) || op == INTERPRETER_TRANSLATE(ldrcond) ||
++               op == INTERPRETER_TRANSLATE(str) || op == INTERPRETER_TRANSLATE(ldrb) ||
++               op == INTERPRETER_TRANSLATE(strb)) {
++        // Immediate offset, no writeback: I = 0, P = 1, W = 0.
++        if (BIT(inst, 25) || !BIT(inst, 24) || BIT(inst, 21) || Rd == 15)
++            return;
++        const u32 off = BITS(inst, 0, 11);
++        const u32 signed_off = BIT(inst, 23) ? off : 0u - off;
++        const bool load_word = op == INTERPRETER_TRANSLATE(ldr) || op == INTERPRETER_TRANSLATE(ldrcond);
++        unsigned idx;
++        u32 offset = signed_off;
++        if (Rn == 15) {
++            if (!load_word)
++                return;
++            idx = LDR_LIT_IDX;
++            offset = pc + 8 + signed_off; // what LnSWoUBImmediateOffset reads PC as
++        } else if (load_word) {
++            idx = LDR_IMM_IDX;
++        } else if (op == INTERPRETER_TRANSLATE(str)) {
++            idx = STR_IMM_IDX;
++        } else {
++            idx = op == INTERPRETER_TRANSLATE(ldrb) ? LDRB_IMM_IDX : STRB_IMM_IDX;
++        }
++        ldst_imm_inst* cream = (ldst_imm_inst*)inst_base->component;
++        *cream = {Rn, Rd, offset};
++        inst_base->idx = idx;
++    }
++}
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.h b/src/core/arm/dyncom/arm_dyncom_trans.h
-index e67df42..966a631 100644
+index e67df42..1c563d4 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.h
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.h
-@@ -83,11 +83,19 @@ struct eor_inst {
+@@ -4,6 +4,7 @@
+ #pragma warning(disable : 4200)
+ #endif
+ 
++#include <atomic>
+ #include <cstddef>
+ #include "common/common_types.h"
+ 
+@@ -83,11 +84,19 @@ struct eor_inst {
      shtop_fp_t shtop_func;
  };
  
@@ -5394,7 +5926,46 @@ index e67df42..966a631 100644
  };
  
  struct bx_inst {
-@@ -496,3 +504,12 @@ extern const std::size_t arm_instruction_trans_len;
+@@ -493,6 +502,51 @@ typedef ARM_INST_PTR (*transop_fp_t)(unsigned int, int);
+ extern const transop_fp_t arm_instruction_trans[];
+ extern const std::size_t arm_instruction_trans_len;
+ 
++// Specialised handlers for the commonest ARM-mode forms (SpecializeArmInstruction). Their
++// InstLabel entries follow the decoder's, so their indices start at the decoder table's length.
++enum : unsigned {
++    SPECIAL_INST_BASE = 202,
++    ADD_IMM_IDX = SPECIAL_INST_BASE, // ADD{S} Rd, Rn, #imm        Rd, Rn != PC
++    ADD_REG_IDX,                     // ADD{S} Rd, Rn, Rm          Rd, Rn, Rm != PC
++    SUB_IMM_IDX,
++    SUB_REG_IDX,
++    CMP_IMM_IDX,                     // CMP Rn, #imm               Rn != PC
++    CMP_REG_IDX,
++    MOV_IMM_IDX,                     // MOV Rd, #imm               Rd != PC
++    LDR_IMM_IDX,                     // LDR Rd, [Rn, #+-imm]       Rd, Rn != PC
++    LDR_LIT_IDX,                     // LDR Rd, [PC, #+-imm]       Rd != PC
++    STR_IMM_IDX,                     // STR Rd, [Rn, #+-imm]       Rd, Rn != PC
++    LDRB_IMM_IDX,
++    STRB_IMM_IDX,
++    SPECIAL_INST_END
++};
++
++// Cream of the specialised loads and stores, written over their ldst_inst (same block size).
++// offset is added modulo 2^32; for LDR_LIT it is the whole address.
++struct ldst_imm_inst {
++    u32 Rn;
++    u32 Rd;
++    u32 offset;
++};
++static_assert(sizeof(ldst_imm_inst) <= sizeof(ldst_inst));
++
++/// After an ARM-mode (not Thumb) instruction at pc is translated: switch it to a specialised
++/// handler when it has one of the forms above. The generic handler stays for everything else.
++void SpecializeArmInstruction(arm_inst* inst_base, u32 inst, u32 pc);
++
++/// Bumped by debug switches that change translation; every core clears its block cache at its
++/// next run (ARM_DynCom::ExecuteInstructions).
++extern std::atomic<u32> g_dyncom_flush_epoch;
++
  #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
  extern char trans_cache_buf[TRANS_CACHE_SIZE];
  extern std::size_t trans_cache_buf_top;

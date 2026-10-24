@@ -65,6 +65,8 @@ extern std::atomic<bool> predecoded;
 extern std::atomic<bool> g_dyncom_tailcall; // core/arm/dyncom/arm_dyncom_interpreter.cpp
 #endif
 extern std::atomic<bool> g_dyncom_link; // core/arm/dyncom/arm_dyncom_interpreter.cpp
+extern std::atomic<bool> g_dyncom_special; // core/arm/dyncom/arm_dyncom_interpreter.cpp
+extern std::atomic<u32> g_dyncom_flush_epoch; // core/arm/dyncom/arm_dyncom_trans.h
 
 namespace AzIOS {
 
@@ -1538,6 +1540,13 @@ int az_debug_dyncom_link(int set) {
     if (set >= 0)
         g_dyncom_link.store(set != 0, std::memory_order_relaxed);
     return g_dyncom_link.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
+int az_debug_dyncom_special(int set) {
+    if (set >= 0 && g_dyncom_special.exchange(set != 0, std::memory_order_relaxed) != (set != 0)) {
+        g_dyncom_flush_epoch.fetch_add(1, std::memory_order_relaxed); // retranslate with it
+    }
+    return g_dyncom_special.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 int az_debug_write_pgo_profile(const char* path) {

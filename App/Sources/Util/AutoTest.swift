@@ -72,9 +72,9 @@ enum AutoTest {
                 waited += 2
                 var s = AZPerfStats()
                 let ok = az_get_perf_stats(&s)
-                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d vfp=%d tc=%d lk=%d",
+                log(AutoTest.hitchSummary(&AutoTest.perfHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + String(format: "t=%.0fs running=%d perf=%d fps=%.1f speed=%.0f%% sw_renderer=%d vfp=%d tc=%d lk=%d sp=%d",
                            waited, az_is_running() ? 1 : 0, ok ? 1 : 0, s.game_fps,
-                           s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0, az_debug_vfp_native(-1), az_debug_dyncom_tailcall(-1), az_debug_dyncom_link(-1))
+                           s.emulation_speed * 100, az_is_software_renderer() ? 1 : 0, az_debug_vfp_native(-1), az_debug_dyncom_tailcall(-1), az_debug_dyncom_link(-1), az_debug_dyncom_special(-1))
                     + " state=\(String(describing: core.state))")
                 if waited >= delay && waited < delay + 2 {
                     if let url = await core.screenshot() {
@@ -355,6 +355,9 @@ enum RemotePlay {
             case "link":
                 // link 0|1: direct branches through the dispatch lookup / linked (A/B runs).
                 log("link \(az_debug_dyncom_link(Int32(n(1, 1))))")
+            case "special":
+                // special 0|1: generic handlers only / specialised common forms (A/B runs).
+                log("special \(az_debug_dyncom_special(Int32(n(1, 1))))")
             case "prof":
                 // prof seconds hz: sample the emulation thread's stack into remote/prof.txt.
                 let secs = n(1, 10), hz = n(2, 1000)
