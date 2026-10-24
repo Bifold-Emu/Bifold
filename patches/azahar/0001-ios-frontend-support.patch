@@ -465,7 +465,7 @@ index 47d2606..9625528 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..9e16b29 100644
+index 781ff3d..a699446 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,11 @@
@@ -757,7 +757,7 @@ index 781ff3d..9e16b29 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -921,9 +978,54 @@ static int clz(unsigned int x) {
+@@ -921,9 +978,82 @@ static int clz(unsigned int x) {
  
  MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
  
@@ -801,6 +801,34 @@ index 781ff3d..9e16b29 100644
 +    return itr->second;
 +}
 +
++// Return prediction (ARMul_State::return_stack): pops the latest call and returns the block for
++// the PC just set when it is that call's return address, else NO_BLOCK (dispatch looks it up).
++static inline std::size_t PredictReturn(ARMul_State* cpu) {
++    const ARMul_State::ReturnEntry& e =
++        cpu->return_stack[--cpu->return_top & (ARMul_State::RETURN_STACK_SIZE - 1)];
++    const u32 gen = cpu->block_cache_generation;
++    if (e.pc != cpu->Reg[15] || e.generation != gen || e.link == nullptr || cpu->TFlag ||
++        !(cpu->NirqSig || (cpu->Cpsr & 0x80))) {
++        return NO_BLOCK;
++    }
++    if (e.link->gen == gen) [[likely]] {
++        return e.link->ptr;
++    }
++    if (!g_dyncom_link.load(std::memory_order_relaxed)) {
++        return NO_BLOCK;
++    }
++    const std::size_t block = LookupCachedBlock(cpu, e.pc);
++    if (block != NO_BLOCK) {
++        *e.link = {gen, static_cast<u32>(block)};
++    }
++    return block;
++}
++
++static inline void PushReturn(ARMul_State* cpu, u32 pc, BlockLink* link) {
++    cpu->return_stack[cpu->return_top++ & (ARMul_State::RETURN_STACK_SIZE - 1)] = {
++        pc, cpu->block_cache_generation, link};
++}
++
  unsigned InterpreterMainLoop(ARMul_State* cpu) {
      MICROPROFILE_SCOPE(DynCom_Execute);
  
@@ -812,7 +840,7 @@ index 781ff3d..9e16b29 100644
  #ifdef ENABLE_GDBSTUB
      /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
      GDBStub::BreakpointAddress breakpoint_data;
-@@ -946,7 +1048,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -946,7 +1076,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -821,7 +849,7 @@ index 781ff3d..9e16b29 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1622,9 +1724,35 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1622,9 +1752,35 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
                           &&BL_1_THUMB,
                           &&BL_2_THUMB,
                           &&BLX_1_THUMB,
@@ -857,7 +885,7 @@ index 781ff3d..9e16b29 100644
  #endif
      arm_inst* inst_base;
      unsigned int addr;
-@@ -1632,6 +1760,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1632,6 +1788,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  
      std::size_t ptr;
  
@@ -873,7 +901,7 @@ index 781ff3d..9e16b29 100644
      LOAD_NZCVT;
  DISPATCH: {
      if (!cpu->NirqSig) {
-@@ -1646,15 +1783,28 @@ DISPATCH: {
+@@ -1646,15 +1811,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -911,7 +939,7 @@ index 781ff3d..9e16b29 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -1768,17 +1918,39 @@ AND_INST: {
+@@ -1768,17 +1946,40 @@ AND_INST: {
      GOTO_NEXT_INST;
  }
  BBL_INST: {
@@ -921,6 +949,7 @@ index 781ff3d..9e16b29 100644
 -        bbl_inst* inst_cream = (bbl_inst*)inst_base->component;
          if (inst_cream->L) {
              LINK_RTN_ADDR;
++            PushReturn(cpu, cpu->Reg[14], &inst_cream->link[1]); // link[1] is the block at pc + 4
          }
          SET_PC;
 -        INC_PC(sizeof(bbl_inst));
@@ -955,7 +984,33 @@ index 781ff3d..9e16b29 100644
      goto DISPATCH;
  }
  BIC_INST: {
-@@ -2038,7 +2210,7 @@ LDC_INST: {
+@@ -1830,6 +2031,8 @@ BLX_INST: {
+             cpu->Reg[14] = (cpu->Reg[15] + cpu->GetInstructionSize());
+             if (cpu->TFlag)
+                 cpu->Reg[14] |= 0x1;
++            else
++                PushReturn(cpu, cpu->Reg[14], nullptr); // keeps the return stack in step
+             cpu->Reg[15] = jump_address & 0xfffffffe;
+             cpu->TFlag = jump_address & 0x1;
+         } else {
+@@ -1869,6 +2072,16 @@ BXJ_INST: {
+         cpu->TFlag = address & 1;
+         cpu->Reg[15] = address & 0xfffffffe;
+         INC_PC(sizeof(bx_inst));
++#ifndef ENABLE_GDBSTUB // a predicted block skips the breakpoint lookup at dispatch
++        if (inst_cream->Rm == 14) {
++            const std::size_t block = PredictReturn(cpu);
++            if (block != NO_BLOCK) {
++                ptr = block;
++                inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                GOTO_NEXT_INST;
++            }
++        }
++#endif
+         goto DISPATCH;
+     }
+ 
+@@ -2038,7 +2251,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -964,7 +1019,7 @@ index 781ff3d..9e16b29 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2237,19 @@ LDM_INST: {
+@@ -2065,19 +2278,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -996,7 +1051,7 @@ index 781ff3d..9e16b29 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2297,7 @@ SXTH_INST: {
+@@ -2125,7 +2338,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1005,7 +1060,7 @@ index 781ff3d..9e16b29 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2318,7 @@ LDR_INST: {
+@@ -2146,7 +2359,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1014,7 +1069,7 @@ index 781ff3d..9e16b29 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2361,7 @@ UXTAH_INST: {
+@@ -2189,7 +2402,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1023,7 +1078,7 @@ index 781ff3d..9e16b29 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2373,7 @@ LDRB_INST: {
+@@ -2201,7 +2414,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1032,7 +1087,7 @@ index 781ff3d..9e16b29 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2394,7 @@ LDRD_INST: {
+@@ -2222,7 +2435,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -1041,7 +1096,7 @@ index 781ff3d..9e16b29 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2469,7 @@ LDREXD_INST: {
+@@ -2297,7 +2510,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1050,7 +1105,7 @@ index 781ff3d..9e16b29 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2481,7 @@ LDRH_INST: {
+@@ -2309,7 +2522,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1059,7 +1114,7 @@ index 781ff3d..9e16b29 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2496,7 @@ LDRSB_INST: {
+@@ -2324,7 +2537,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1068,7 +1123,7 @@ index 781ff3d..9e16b29 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2512,7 @@ LDRSH_INST: {
+@@ -2340,7 +2553,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1077,7 +1132,7 @@ index 781ff3d..9e16b29 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3737,7 @@ STM_INST: {
+@@ -3565,7 +3778,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -1086,7 +1141,7 @@ index 781ff3d..9e16b29 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3765,14 @@ STM_INST: {
+@@ -3593,15 +3806,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -1109,7 +1164,7 @@ index 781ff3d..9e16b29 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3806,7 @@ SXTB_INST: {
+@@ -3635,7 +3847,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1118,7 +1173,7 @@ index 781ff3d..9e16b29 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3846,7 @@ UXTAB_INST: {
+@@ -3675,7 +3887,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1127,7 +1182,7 @@ index 781ff3d..9e16b29 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3858,7 @@ STRB_INST: {
+@@ -3687,7 +3899,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1136,7 +1191,7 @@ index 781ff3d..9e16b29 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3875,7 @@ STRBT_INST: {
+@@ -3704,7 +3916,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1145,7 +1200,7 @@ index 781ff3d..9e16b29 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3976,7 @@ STREXH_INST: {
+@@ -3805,7 +4017,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1154,7 +1209,7 @@ index 781ff3d..9e16b29 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3989,7 @@ STRH_INST: {
+@@ -3818,7 +4030,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1163,7 +1218,7 @@ index 781ff3d..9e16b29 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +4042,17 @@ SUB_INST: {
+@@ -3871,11 +4083,17 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1186,7 +1241,7 @@ index 781ff3d..9e16b29 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4580,6 +4757,402 @@ YIELD_INST: {
+@@ -4580,6 +4798,412 @@ YIELD_INST: {
      GOTO_NEXT_INST;
  }
  
@@ -1546,6 +1601,16 @@ index 781ff3d..9e16b29 100644
 +            cpu->TFlag = cpu->Reg[15] & 0x1;
 +            cpu->Reg[15] &= 0xFFFFFFFE;
 +            INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (inst_cream->Rn == 13) { // POP {..., PC}: a return
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
 +            goto DISPATCH;
 +        }
 +    }
@@ -1589,7 +1654,7 @@ index 781ff3d..9e16b29 100644
  #define VFP_INTERPRETER_IMPL
  #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
  #undef VFP_INTERPRETER_IMPL
-@@ -4594,3 +5167,7 @@ INIT_INST_LENGTH: {
+@@ -4594,3 +5218,7 @@ INIT_INST_LENGTH: {
      return num_instrs;
  }
  }
@@ -1599,10 +1664,10 @@ index 781ff3d..9e16b29 100644
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..c5c773c
+index 0000000..2c3d782
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,4702 @@
+@@ -0,0 +1,4725 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -2202,6 +2267,7 @@ index 0000000..c5c773c
 +    if ((inst_base->cond == ConditionCode::AL) || CondPassed(cpu, inst_base->cond)) {
 +        if (inst_cream->L) {
 +            LINK_RTN_ADDR;
++            PushReturn(cpu, cpu->Reg[14], &inst_cream->link[1]); // link[1] is the block at pc + 4
 +        }
 +        SET_PC;
 +        link = &inst_cream->link[0];
@@ -2287,6 +2353,8 @@ index 0000000..c5c773c
 +            cpu->Reg[14] = (cpu->Reg[15] + cpu->GetInstructionSize());
 +            if (cpu->TFlag)
 +                cpu->Reg[14] |= 0x1;
++            else
++                PushReturn(cpu, cpu->Reg[14], nullptr); // keeps the return stack in step
 +            cpu->Reg[15] = jump_address & 0xfffffffe;
 +            cpu->TFlag = jump_address & 0x1;
 +        } else {
@@ -2327,6 +2395,16 @@ index 0000000..c5c773c
 +        cpu->TFlag = address & 1;
 +        cpu->Reg[15] = address & 0xfffffffe;
 +        INC_PC(sizeof(bx_inst));
++#ifndef ENABLE_GDBSTUB // a predicted block skips the breakpoint lookup at dispatch
++        if (inst_cream->Rm == 14) {
++            const std::size_t block = PredictReturn(cpu);
++            if (block != NO_BLOCK) {
++                ptr = block;
++                inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                GOTO_NEXT_INST;
++            }
++        }
++#endif
 +        TC_GOTO_DISPATCH;
 +    }
 +
@@ -5573,6 +5651,16 @@ index 0000000..c5c773c
 +            cpu->TFlag = cpu->Reg[15] & 0x1;
 +            cpu->Reg[15] &= 0xFFFFFFFE;
 +            INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (inst_cream->Rn == 13) { // POP {..., PC}: a return
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
 +            TC_GOTO_DISPATCH;
 +        }
 +    }
@@ -6712,7 +6800,7 @@ index 55abdf1..889d19b 100644
          data = Common::swap64(data);
  
 diff --git a/src/core/arm/skyeye_common/armstate.h b/src/core/arm/skyeye_common/armstate.h
-index 676fd29..2721485 100644
+index 676fd29..98e478f 100644
 --- a/src/core/arm/skyeye_common/armstate.h
 +++ b/src/core/arm/skyeye_common/armstate.h
 @@ -22,8 +22,11 @@
@@ -6727,7 +6815,16 @@ index 676fd29..2721485 100644
  #include "core/arm/skyeye_common/arm_regformat.h"
  #ifdef ENABLE_GDBSTUB
  #include "core/gdbstub/gdbstub.h"
-@@ -161,14 +164,79 @@ public:
+@@ -33,6 +36,8 @@ namespace Core {
+ class System;
+ }
+ 
++struct BlockLink; // core/arm/dyncom/arm_dyncom_trans.h
++
+ namespace Memory {
+ class MemorySystem;
+ }
+@@ -161,14 +166,79 @@ public:
  
      // Reads/writes data in big/little endian format based on the
      // state of the E (endian) bit in the APSR.
@@ -6815,7 +6912,7 @@ index 676fd29..2721485 100644
  
      u32 ReadCP15Register(u32 crn, u32 opcode_1, u32 crm, u32 opcode_2) const;
      void WriteCP15Register(u32 value, u32 crn, u32 opcode_1, u32 crm, u32 opcode_2);
-@@ -217,6 +285,24 @@ public:
+@@ -217,6 +287,24 @@ public:
      Core::System& system;
      Memory::MemorySystem& memory;
  
@@ -6840,7 +6937,7 @@ index 676fd29..2721485 100644
      std::array<u32, 16> Reg{}; // The current register file
      std::array<u32, 2> Reg_usr{};
      std::array<u32, 2> Reg_svc{};   // R13_SVC R14_SVC
-@@ -233,6 +319,12 @@ public:
+@@ -233,6 +321,12 @@ public:
      // VFPv2 and VFPv3-D16 has 16 doubleword registers (D0-D16 or S0-S31).
      // VFPv3-D32/ASIMD may have up to 32 doubleword registers (D0-D31),
      // and only 32 singleword registers are accessible (S0-S31).
@@ -6853,7 +6950,7 @@ index 676fd29..2721485 100644
      std::array<u32, 64> ExtReg{};
  
      u32 Emulate; // To start and stop emulation
-@@ -264,6 +356,27 @@ public:
+@@ -264,6 +358,40 @@ public:
      // process for our purposes), not per ARMul_State (which tracks CPU core state).
      std::unordered_map<u32, std::size_t> instruction_cache;
  
@@ -6869,6 +6966,19 @@ index 676fd29..2721485 100644
 +    static constexpr std::size_t FAST_BLOCK_CACHE_BITS = 13;
 +    std::array<FastBlockEntry, std::size_t{1} << FAST_BLOCK_CACHE_BITS> fast_block_cache{};
 +    u32 block_cache_generation = 1;
++
++    // Return prediction for the interpreter: BL pushes its return address with the BL's own
++    // link to the block there (the not-taken link, same address); BX LR and POP {..., PC} pop
++    // and, when the address matches and the block cache is unchanged since the push, go to
++    // that block without a lookup. A wrong prediction only costs the normal lookup.
++    struct ReturnEntry {
++        u32 pc;
++        u32 generation; ///< block_cache_generation at the push: the link is still in place
++        BlockLink* link; ///< null for calls without a link slot (BLX Rm)
++    };
++    static constexpr u32 RETURN_STACK_SIZE = 16;
++    std::array<ReturnEntry, RETURN_STACK_SIZE> return_stack{};
++    u32 return_top = 0;
 +
 +    void ClearBlockCache() {
 +        instruction_cache.clear();

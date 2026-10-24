@@ -46,9 +46,9 @@ NAME="frame dumped";         check test -s "$TMP/dump/top.ppm"
 # alu.elf draws a hash of ADD/SUB/CMP/MOV/LDR/STR results and flags: the interpreter with and
 # without its specialised handlers, and the JIT, must draw the same frame.
 mkdir -p "$TMP/alu1" "$TMP/alu0" "$TMP/aluj"
-AZ_TEST_DUMP="$TMP/alu1" "$T" boot "$ELF/alu.elf" 3 0 >/dev/null 2>&1 || true
-AZ_DYNCOM_NO_SPECIAL=1 AZ_TEST_DUMP="$TMP/alu0" "$T" boot "$ELF/alu.elf" 3 0 >/dev/null 2>&1 || true
-AZ_TEST_DUMP="$TMP/aluj" "$T" boot "$ELF/alu.elf" 3 1 >/dev/null 2>&1 || true
+AZ_TEST_DUMP="$TMP/alu1" "$T" boot "$ELF/alu.elf" 6 0 >/dev/null 2>&1 || true
+AZ_DYNCOM_NO_SPECIAL=1 AZ_TEST_DUMP="$TMP/alu0" "$T" boot "$ELF/alu.elf" 6 0 >/dev/null 2>&1 || true
+AZ_TEST_DUMP="$TMP/aluj" "$T" boot "$ELF/alu.elf" 6 1 >/dev/null 2>&1 || true
 NAME="interpreter: specialised = generic"; check cmp "$TMP/alu1/top.ppm" "$TMP/alu0/top.ppm"
 NAME="interpreter = JIT (alu.elf)";        check cmp "$TMP/alu1/top.ppm" "$TMP/aluj/top.ppm"
 NAME="save state + 3 loads";  check "$T" savestate "$ELF/paint.elf"

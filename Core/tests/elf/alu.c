@@ -97,6 +97,21 @@ asm(".text\n.arm\n.global ldmstm\nldmstm:\n"
     "add r0, r0, r9\n eor r0, r0, r10, ror #11\n"
     "pop {r4-r11, pc}\n");
 
+
+// Calls and returns (the interpreter predicts returns): recursion deeper than its 16-entry
+// return stack, calls through a function pointer (BLX Rm) and a return to Thumb code.
+__attribute__((noinline)) static u32 rec(u32 n, u32 x) {
+    if (n == 0)
+        return x * 3 + 1;
+    const u32 a = rec(n - 1, x ^ n);
+    return (a << 1) ^ rec(n > 1 ? n - 2 : 0, a + n);
+}
+__attribute__((noinline, target("thumb"))) static u32 thumb_leaf(u32 x) { return (x >> 3) ^ (x * 7); }
+__attribute__((noinline, target("thumb"))) static u32 thumb_mid(u32 x, u32 (*f)(u32, u32)) {
+    return f(x & 7, x) + thumb_leaf(x);
+}
+static u32 (*volatile rec_ptr)(u32, u32) = rec;
+
 static void band(u8* fb, u32 rows, u32 hash) {
     for (u32 y = 0; y < rows; ++y) {
         const u32 bit = (hash >> ((y * 32) / rows)) & 1;
@@ -125,6 +140,8 @@ __attribute__((noreturn, section(".text.start"))) void _start(void) {
         h = run(a, b, c, (x >> 7) & 7, &mem[32 + (i & 15)], h);
         // big[1024] starts a page: offsets 1016..1032 make some transfers cross it.
         h = (h ^ ldmstm(a, b, c, &big[1016 + (i & 15)])) * 0x9E3779B1u;
+        if ((i & 63) == 0)
+            h += rec(18 + (i & 1), a) ^ rec_ptr(i & 7, b) ^ thumb_mid(c, rec_ptr);
     }
     for (;;) {
         band((u8*)0x1F1E6000, 400, h);
