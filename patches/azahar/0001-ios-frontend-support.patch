@@ -14,6 +14,14 @@ index 329af28..e4b9764 100644
  if (ENABLE_ROOM_STANDALONE)
      add_subdirectory(citra_room_standalone)
  endif()
+diff --git a/src/azios b/src/azios
+new file mode 120000
+index 0000000..056b06c
+--- /dev/null
++++ b/src/azios
+@@ -0,0 +1 @@
++/Users/Pseudo/3DS_iOS/Core
+\ No newline at end of file
 diff --git a/src/common/apple_utils.mm b/src/common/apple_utils.mm
 index e42cfc2..d513107 100644
 --- a/src/common/apple_utils.mm
@@ -442,7 +450,7 @@ index 47d2606..6637e22 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..5112a23 100644
+index 781ff3d..f9f90dc 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,10 @@
@@ -693,7 +701,7 @@ index 781ff3d..5112a23 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -921,9 +950,34 @@ static int clz(unsigned int x) {
+@@ -921,9 +950,54 @@ static int clz(unsigned int x) {
  
  MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
  
@@ -717,6 +725,26 @@ index 781ff3d..5112a23 100644
 +std::atomic<bool> g_dyncom_tailcall{std::getenv("AZ_DYNCOM_LOOP") == nullptr};
 +#endif
 +
++// Block linking for direct branches (B/BL): on by default; AZ_DYNCOM_NO_LINK=1 (or
++// az_debug_dyncom_link(0)) sends every branch through the dispatch lookup.
++std::atomic<bool> g_dyncom_link{std::getenv("AZ_DYNCOM_NO_LINK") == nullptr};
++
++// The dispatch lookup without translating: the block already translated for pc, or NO_BLOCK.
++// (Returned by value so the handlers' ptr never has its address taken.)
++static constexpr std::size_t NO_BLOCK = ~std::size_t{0};
++static inline std::size_t LookupCachedBlock(ARMul_State* cpu, u32 pc) {
++    auto& fast = cpu->fast_block_cache[(pc >> 1) & (cpu->fast_block_cache.size() - 1)];
++    if (fast.pc == pc && fast.generation == cpu->block_cache_generation) {
++        return fast.ptr;
++    }
++    auto itr = cpu->instruction_cache.find(pc);
++    if (itr == cpu->instruction_cache.end()) {
++        return NO_BLOCK;
++    }
++    fast = {pc, cpu->block_cache_generation, itr->second};
++    return itr->second;
++}
++
  unsigned InterpreterMainLoop(ARMul_State* cpu) {
      MICROPROFILE_SCOPE(DynCom_Execute);
  
@@ -728,7 +756,7 @@ index 781ff3d..5112a23 100644
  #ifdef ENABLE_GDBSTUB
      /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
      GDBStub::BreakpointAddress breakpoint_data;
-@@ -946,7 +1000,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -946,7 +1020,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -737,7 +765,7 @@ index 781ff3d..5112a23 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1632,6 +1686,13 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1632,6 +1706,13 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  
      std::size_t ptr;
  
@@ -751,7 +779,7 @@ index 781ff3d..5112a23 100644
      LOAD_NZCVT;
  DISPATCH: {
      if (!cpu->NirqSig) {
-@@ -1646,15 +1707,28 @@ DISPATCH: {
+@@ -1646,15 +1727,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -789,7 +817,48 @@ index 781ff3d..5112a23 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -2038,7 +2112,7 @@ LDC_INST: {
+@@ -1768,17 +1862,36 @@ AND_INST: {
+     GOTO_NEXT_INST;
+ }
+ BBL_INST: {
++    bbl_inst* inst_cream = (bbl_inst*)inst_base->component;
++    BlockLink* link = &inst_cream->link[1];
+     if ((inst_base->cond == ConditionCode::AL) || CondPassed(cpu, inst_base->cond)) {
+-        bbl_inst* inst_cream = (bbl_inst*)inst_base->component;
+         if (inst_cream->L) {
+             LINK_RTN_ADDR;
+         }
+         SET_PC;
+-        INC_PC(sizeof(bbl_inst));
+-        goto DISPATCH;
++        link = &inst_cream->link[0];
++    } else {
++        cpu->Reg[15] += cpu->GetInstructionSize();
+     }
+-    cpu->Reg[15] += cpu->GetInstructionSize();
+     INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // a linked block skips the breakpoint lookup at dispatch
++    // Both targets are fixed, so the block found the first time is reused while the block
++    // cache generation is unchanged. The interrupt check is the one at dispatch.
++    if ((cpu->NirqSig || (cpu->Cpsr & 0x80)) && g_dyncom_link.load(std::memory_order_relaxed)) {
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = LookupCachedBlock(cpu, cpu->Reg[15]);
++            if (block == NO_BLOCK) {
++                goto DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
+     goto DISPATCH;
+ }
+ BIC_INST: {
+@@ -2038,7 +2151,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -798,7 +867,7 @@ index 781ff3d..5112a23 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2139,19 @@ LDM_INST: {
+@@ -2065,19 +2178,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -830,7 +899,7 @@ index 781ff3d..5112a23 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2199,7 @@ SXTH_INST: {
+@@ -2125,7 +2238,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -839,7 +908,7 @@ index 781ff3d..5112a23 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2220,7 @@ LDR_INST: {
+@@ -2146,7 +2259,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -848,7 +917,7 @@ index 781ff3d..5112a23 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2263,7 @@ UXTAH_INST: {
+@@ -2189,7 +2302,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -857,7 +926,7 @@ index 781ff3d..5112a23 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2275,7 @@ LDRB_INST: {
+@@ -2201,7 +2314,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -866,7 +935,7 @@ index 781ff3d..5112a23 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2296,7 @@ LDRD_INST: {
+@@ -2222,7 +2335,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -875,7 +944,7 @@ index 781ff3d..5112a23 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2371,7 @@ LDREXD_INST: {
+@@ -2297,7 +2410,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -884,7 +953,7 @@ index 781ff3d..5112a23 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2383,7 @@ LDRH_INST: {
+@@ -2309,7 +2422,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -893,7 +962,7 @@ index 781ff3d..5112a23 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2398,7 @@ LDRSB_INST: {
+@@ -2324,7 +2437,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -902,7 +971,7 @@ index 781ff3d..5112a23 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2414,7 @@ LDRSH_INST: {
+@@ -2340,7 +2453,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -911,7 +980,7 @@ index 781ff3d..5112a23 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3639,7 @@ STM_INST: {
+@@ -3565,7 +3678,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -920,7 +989,7 @@ index 781ff3d..5112a23 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3667,14 @@ STM_INST: {
+@@ -3593,15 +3706,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -943,7 +1012,7 @@ index 781ff3d..5112a23 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3708,7 @@ SXTB_INST: {
+@@ -3635,7 +3747,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -952,7 +1021,7 @@ index 781ff3d..5112a23 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3748,7 @@ UXTAB_INST: {
+@@ -3675,7 +3787,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -961,7 +1030,7 @@ index 781ff3d..5112a23 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3760,7 @@ STRB_INST: {
+@@ -3687,7 +3799,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -970,7 +1039,7 @@ index 781ff3d..5112a23 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3777,7 @@ STRBT_INST: {
+@@ -3704,7 +3816,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -979,7 +1048,7 @@ index 781ff3d..5112a23 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3878,7 @@ STREXH_INST: {
+@@ -3805,7 +3917,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -988,7 +1057,7 @@ index 781ff3d..5112a23 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3891,7 @@ STRH_INST: {
+@@ -3818,7 +3930,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -997,7 +1066,7 @@ index 781ff3d..5112a23 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +3944,16 @@ SUB_INST: {
+@@ -3871,11 +3983,16 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1019,7 +1088,7 @@ index 781ff3d..5112a23 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4594,3 +4672,7 @@ INIT_INST_LENGTH: {
+@@ -4594,3 +4711,7 @@ INIT_INST_LENGTH: {
      return num_instrs;
  }
  }
@@ -1029,10 +1098,10 @@ index 781ff3d..5112a23 100644
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..8a5a611
+index 0000000..2c42c33
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,4195 @@
+@@ -0,0 +1,4214 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -1577,17 +1646,36 @@ index 0000000..8a5a611
 +
 +static TC_CC unsigned TC_BBL_INST(TC_ARGS) {
 +    [[maybe_unused]] unsigned int addr;
++    bbl_inst* inst_cream = (bbl_inst*)inst_base->component;
++    BlockLink* link = &inst_cream->link[1];
 +    if ((inst_base->cond == ConditionCode::AL) || CondPassed(cpu, inst_base->cond)) {
-+        bbl_inst* inst_cream = (bbl_inst*)inst_base->component;
 +        if (inst_cream->L) {
 +            LINK_RTN_ADDR;
 +        }
 +        SET_PC;
-+        INC_PC(sizeof(bbl_inst));
-+        TC_GOTO_DISPATCH;
++        link = &inst_cream->link[0];
++    } else {
++        cpu->Reg[15] += cpu->GetInstructionSize();
 +    }
-+    cpu->Reg[15] += cpu->GetInstructionSize();
 +    INC_PC(sizeof(bbl_inst));
++#ifndef ENABLE_GDBSTUB // a linked block skips the breakpoint lookup at dispatch
++    // Both targets are fixed, so the block found the first time is reused while the block
++    // cache generation is unchanged. The interrupt check is the one at dispatch.
++    if ((cpu->NirqSig || (cpu->Cpsr & 0x80)) && g_dyncom_link.load(std::memory_order_relaxed)) {
++        if (link->gen == cpu->block_cache_generation) [[likely]] {
++            ptr = link->ptr;
++        } else {
++            const std::size_t block = LookupCachedBlock(cpu, cpu->Reg[15]);
++            if (block == NO_BLOCK) {
++                TC_GOTO_DISPATCH;
++            }
++            *link = {cpu->block_cache_generation, static_cast<u32>(block)};
++            ptr = block;
++        }
++        inst_base = (arm_inst*)&trans_cache_buf[ptr];
++        GOTO_NEXT_INST;
++    }
++#endif
 +    TC_GOTO_DISPATCH;
 +}
 +
@@ -5229,7 +5317,7 @@ index 0000000..8a5a611
 +#undef TC_GOTO_DISPATCH
 +#undef TC_GOTO_END
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
-index 729c407..632252e 100644
+index 729c407..6b4d3da 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
 @@ -1,4 +1,5 @@
@@ -5273,11 +5361,40 @@ index 729c407..632252e 100644
  static void* AllocBuffer(std::size_t size) {
      std::size_t start = trans_cache_buf_top;
      trans_cache_buf_top += size;
+@@ -99,6 +128,8 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(bbl)(unsigned int inst, int index) {
+ 
+     inst_cream->L = BIT(inst, 24);
+     inst_cream->signed_immed_24 = BIT(inst, 23) ? NEGBRANCH : POSBRANCH;
++    inst_cream->link[0] = {};
++    inst_cream->link[1] = {};
+ 
+     return inst_base;
+ }
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.h b/src/core/arm/dyncom/arm_dyncom_trans.h
-index e67df42..3afe88c 100644
+index e67df42..966a631 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.h
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.h
-@@ -496,3 +496,12 @@ extern const std::size_t arm_instruction_trans_len;
+@@ -83,11 +83,19 @@ struct eor_inst {
+     shtop_fp_t shtop_func;
+ };
+ 
++// Block link: the translated block a direct branch goes to, valid while gen matches the core's
++// block_cache_generation (0 never matches), so a link skips the block lookup at dispatch.
++struct BlockLink {
++    u32 gen;
++    u32 ptr;
++};
++
+ struct bbl_inst {
+     unsigned int L;
+     int signed_immed_24;
+     unsigned int next_addr;
+     unsigned int jmp_addr;
++    BlockLink link[2]; // [0] taken, [1] not taken
+ };
+ 
+ struct bx_inst {
+@@ -496,3 +504,12 @@ extern const std::size_t arm_instruction_trans_len;
  #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
  extern char trans_cache_buf[TRANS_CACHE_SIZE];
  extern std::size_t trans_cache_buf_top;

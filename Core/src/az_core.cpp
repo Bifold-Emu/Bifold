@@ -64,6 +64,7 @@ extern std::atomic<bool> predecoded;
 #if defined(__clang__)
 extern std::atomic<bool> g_dyncom_tailcall; // core/arm/dyncom/arm_dyncom_interpreter.cpp
 #endif
+extern std::atomic<bool> g_dyncom_link; // core/arm/dyncom/arm_dyncom_interpreter.cpp
 
 namespace AzIOS {
 
@@ -1531,6 +1532,12 @@ int az_debug_dyncom_tailcall(int set) {
 #else
     return -1;
 #endif
+}
+
+int az_debug_dyncom_link(int set) {
+    if (set >= 0)
+        g_dyncom_link.store(set != 0, std::memory_order_relaxed);
+    return g_dyncom_link.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 int az_debug_write_pgo_profile(const char* path) {

@@ -205,6 +205,9 @@ int az_debug_vfp_native(int set);
 /// Debug: whether the interpreter runs its tail-call copy (1) or the original loop (0); `set` 0
 /// or 1 changes it (from the next interpreter run), -1 only reads it. -1 where not built.
 int az_debug_dyncom_tailcall(int set);
+/// Debug: whether direct branches link straight to their target block (1, default) or always go
+/// through the dispatch lookup (0); `set` 0 or 1 changes it at once, -1 only reads it.
+int az_debug_dyncom_link(int set);
 
 // ---- Software renderer presentation ------------------------------------------------------------
 // Used in the iOS Simulator (its Metal driver cannot run MoltenVK's texel buffers) and as the
