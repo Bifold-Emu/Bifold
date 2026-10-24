@@ -465,10 +465,10 @@ index 47d2606..9625528 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..889076a 100644
+index 781ff3d..9e16b29 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-@@ -9,6 +9,10 @@
+@@ -9,6 +9,11 @@
  #define CITRA_IGNORE_EXIT(x)
  
  #include <algorithm>
@@ -476,10 +476,11 @@ index 781ff3d..889076a 100644
 +#include <cstdlib>
 +#include <array>
 +#include <bit>
++#include <cstring>
  #include <cstdio>
  #include "common/common_types.h"
  #include "common/logging/log.h"
-@@ -39,11 +43,8 @@
+@@ -39,11 +44,8 @@
  #define ROTATE_RIGHT_32(n, i) ROTATE_RIGHT(n, i, 32)
  #define ROTATE_LEFT_32(n, i) ROTATE_LEFT(n, i, 32)
  
@@ -493,7 +494,7 @@ index 781ff3d..889076a 100644
  
      switch (cond) {
      case ConditionCode::EQ:
-@@ -82,7 +83,44 @@ static bool CondPassed(const ARMul_State* cpu, unsigned int cond) {
+@@ -82,7 +84,44 @@ static bool CondPassed(const ARMul_State* cpu, unsigned int cond) {
      return false;
  }
  
@@ -539,7 +540,7 @@ index 781ff3d..889076a 100644
      unsigned int immed_8 = BITS(sht_oper, 0, 7);
      unsigned int rotate_imm = BITS(sht_oper, 8, 11);
      unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
-@@ -93,14 +131,14 @@ static unsigned int DPO(Immediate)(ARMul_State* cpu, unsigned int sht_oper) {
+@@ -93,14 +132,14 @@ static unsigned int DPO(Immediate)(ARMul_State* cpu, unsigned int sht_oper) {
      return shifter_operand;
  }
  
@@ -556,7 +557,7 @@ index 781ff3d..889076a 100644
      int shift_imm = BITS(sht_oper, 7, 11);
      unsigned int rm = CHECK_READ_REG15(cpu, RM);
      unsigned int shifter_operand;
-@@ -134,7 +172,7 @@ static unsigned int DPO(LogicalShiftLeftByRegister)(ARMul_State* cpu, unsigned i
+@@ -134,7 +173,7 @@ static unsigned int DPO(LogicalShiftLeftByRegister)(ARMul_State* cpu, unsigned i
      return shifter_operand;
  }
  
@@ -565,7 +566,7 @@ index 781ff3d..889076a 100644
      unsigned int rm = CHECK_READ_REG15(cpu, RM);
      unsigned int shifter_operand;
      int shift_imm = BITS(sht_oper, 7, 11);
-@@ -168,7 +206,7 @@ static unsigned int DPO(LogicalShiftRightByRegister)(ARMul_State* cpu, unsigned
+@@ -168,7 +207,7 @@ static unsigned int DPO(LogicalShiftRightByRegister)(ARMul_State* cpu, unsigned
      return shifter_operand;
  }
  
@@ -574,7 +575,7 @@ index 781ff3d..889076a 100644
      unsigned int rm = CHECK_READ_REG15(cpu, RM);
      unsigned int shifter_operand;
      int shift_imm = BITS(sht_oper, 7, 11);
-@@ -236,6 +274,22 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
+@@ -236,6 +275,22 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
      return shifter_operand;
  }
  
@@ -597,7 +598,7 @@ index 781ff3d..889076a 100644
  #define DEBUG_MSG                                                                                  \
      LOG_DEBUG(Core_ARM11, "inst is {:x}", inst);                                                   \
      CITRA_IGNORE_EXIT(0)
-@@ -250,7 +304,7 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
+@@ -250,7 +305,7 @@ static unsigned int DPO(RotateRightByRegister)(ARMul_State* cpu, unsigned int sh
  #define P_BIT BIT(inst, 24)
  #define OFFSET_12 BITS(inst, 0, 11)
  
@@ -606,7 +607,7 @@ index 781ff3d..889076a 100644
      unsigned int Rn = BITS(inst, 16, 19);
      unsigned int addr;
  
-@@ -262,7 +316,7 @@ static void LnSWoUB(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsign
+@@ -262,7 +317,7 @@ static void LnSWoUB(ImmediateOffset)(ARMul_State* cpu, unsigned int inst, unsign
      virt_addr = addr;
  }
  
@@ -615,7 +616,7 @@ index 781ff3d..889076a 100644
      unsigned int Rn = BITS(inst, 16, 19);
      unsigned int Rm = BITS(inst, 0, 3);
      unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
-@@ -463,7 +517,7 @@ static void LnSWoUB(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
+@@ -463,7 +518,7 @@ static void LnSWoUB(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
      }
  }
  
@@ -624,7 +625,7 @@ index 781ff3d..889076a 100644
      unsigned int immedL = BITS(inst, 0, 3);
      unsigned int immedH = BITS(inst, 8, 11);
      unsigned int Rn = BITS(inst, 16, 19);
-@@ -550,16 +604,9 @@ static void MLnS(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
+@@ -550,16 +605,9 @@ static void MLnS(RegisterPostIndexed)(ARMul_State* cpu, unsigned int inst,
      }
  }
  
@@ -643,7 +644,7 @@ index 781ff3d..889076a 100644
  
      virt_addr = CHECK_READ_REG15_WA(cpu, Rn) - count * 4;
  
-@@ -569,14 +616,7 @@ static void LdnStM(DecrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
+@@ -569,14 +617,7 @@ static void LdnStM(DecrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
  
  static void LdnStM(IncrementBefore)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
      unsigned int Rn = BITS(inst, 16, 19);
@@ -659,7 +660,7 @@ index 781ff3d..889076a 100644
  
      virt_addr = CHECK_READ_REG15_WA(cpu, Rn) + 4;
  
-@@ -584,16 +624,9 @@ static void LdnStM(IncrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
+@@ -584,16 +625,9 @@ static void LdnStM(IncrementBefore)(ARMul_State* cpu, unsigned int inst, unsigne
          cpu->Reg[Rn] += count * 4;
  }
  
@@ -678,7 +679,7 @@ index 781ff3d..889076a 100644
  
      virt_addr = CHECK_READ_REG15_WA(cpu, Rn);
  
-@@ -603,13 +636,7 @@ static void LdnStM(IncrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned
+@@ -603,13 +637,7 @@ static void LdnStM(IncrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned
  
  static void LdnStM(DecrementAfter)(ARMul_State* cpu, unsigned int inst, unsigned int& virt_addr) {
      unsigned int Rn = BITS(inst, 16, 19);
@@ -693,7 +694,7 @@ index 781ff3d..889076a 100644
      unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
      unsigned int start_addr = rn - count * 4 + 4;
  
-@@ -669,6 +696,23 @@ static void LnSWoUB(ScaledRegisterOffset)(ARMul_State* cpu, unsigned int inst,
+@@ -669,6 +697,23 @@ static void LnSWoUB(ScaledRegisterOffset)(ARMul_State* cpu, unsigned int inst,
      virt_addr = addr;
  }
  
@@ -717,7 +718,7 @@ index 781ff3d..889076a 100644
  shtop_fp_t GetShifterOp(unsigned int inst) {
      if (BIT(inst, 25)) {
          return DPO(Immediate);
-@@ -813,6 +857,11 @@ enum { KEEP_GOING, FETCH_EXCEPTION };
+@@ -813,6 +858,11 @@ enum { KEEP_GOING, FETCH_EXCEPTION };
  
  MICROPROFILE_DEFINE(DynCom_Decode, "DynCom", "Decode", MP_RGB(255, 64, 64));
  
@@ -729,7 +730,7 @@ index 781ff3d..889076a 100644
  static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, const u32 phys_addr,
                                                      ARM_INST_PTR& inst_base) {
      u32 inst_size = 4;
-@@ -841,12 +890,18 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+@@ -841,12 +891,18 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
          CITRA_IGNORE_EXIT(-1);
      }
      inst_base = arm_instruction_trans[idx](inst, idx);
@@ -748,7 +749,7 @@ index 781ff3d..889076a 100644
  
      // Decode instruction, get index
      // Allocate memory and init InsCream
-@@ -876,6 +931,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+@@ -876,6 +932,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
  
  static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
      MICROPROFILE_SCOPE(DynCom_Decode);
@@ -756,7 +757,7 @@ index 781ff3d..889076a 100644
  
      ARM_INST_PTR inst_base = nullptr;
      bb_start = trans_cache_buf_top;
-@@ -921,9 +977,54 @@ static int clz(unsigned int x) {
+@@ -921,9 +978,54 @@ static int clz(unsigned int x) {
  
  MICROPROFILE_DEFINE(DynCom_Execute, "DynCom", "execute", MP_RGB(255, 0, 0));
  
@@ -811,7 +812,7 @@ index 781ff3d..889076a 100644
  #ifdef ENABLE_GDBSTUB
      /// Nearest upcoming GDB code execution breakpoint, relative to the last dispatch's address.
      GDBStub::BreakpointAddress breakpoint_data;
-@@ -946,7 +1047,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -946,7 +1048,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  #define RDLO cpu->Reg[inst_cream->RdLo]
  #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
  #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
@@ -820,7 +821,7 @@ index 781ff3d..889076a 100644
  
  #define FETCH_INST                                                                                 \
      if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
-@@ -1622,9 +1723,33 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1622,9 +1724,35 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
                           &&BL_1_THUMB,
                           &&BL_2_THUMB,
                           &&BLX_1_THUMB,
@@ -847,6 +848,8 @@ index 781ff3d..889076a 100644
 +                         &&LDR_REG_INST,
 +                         &&STR_REG_INST,
 +                         &&LDRB_REG_INST,
++                         &&LDM_FAST_INST,
++                         &&STM_FAST_INST,
                           &&DISPATCH,
                           &&INIT_INST_LENGTH,
                           &&END};
@@ -854,7 +857,7 @@ index 781ff3d..889076a 100644
  #endif
      arm_inst* inst_base;
      unsigned int addr;
-@@ -1632,6 +1757,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+@@ -1632,6 +1760,15 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
  
      std::size_t ptr;
  
@@ -870,7 +873,7 @@ index 781ff3d..889076a 100644
      LOAD_NZCVT;
  DISPATCH: {
      if (!cpu->NirqSig) {
-@@ -1646,15 +1780,28 @@ DISPATCH: {
+@@ -1646,15 +1783,28 @@ DISPATCH: {
          cpu->Reg[15] &= 0xfffffffc;
  
      // Find the cached instruction cream, otherwise translate it...
@@ -908,7 +911,7 @@ index 781ff3d..889076a 100644
      }
  
  #ifdef ENABLE_GDBSTUB
-@@ -1768,17 +1915,39 @@ AND_INST: {
+@@ -1768,17 +1918,39 @@ AND_INST: {
      GOTO_NEXT_INST;
  }
  BBL_INST: {
@@ -952,7 +955,7 @@ index 781ff3d..889076a 100644
      goto DISPATCH;
  }
  BIC_INST: {
-@@ -2038,7 +2207,7 @@ LDC_INST: {
+@@ -2038,7 +2210,7 @@ LDC_INST: {
  LDM_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -961,7 +964,7 @@ index 781ff3d..889076a 100644
  
          unsigned int inst = inst_cream->inst;
          if (BIT(inst, 22) && !BIT(inst, 15)) {
-@@ -2065,19 +2234,19 @@ LDM_INST: {
+@@ -2065,19 +2237,19 @@ LDM_INST: {
                  addr += 4;
              }
          } else if (!BIT(inst, 22)) {
@@ -993,7 +996,7 @@ index 781ff3d..889076a 100644
              }
          } else if (BIT(inst, 22) && BIT(inst, 15)) {
              for (int i = 0; i < 15; i++) {
-@@ -2125,7 +2294,7 @@ SXTH_INST: {
+@@ -2125,7 +2297,7 @@ SXTH_INST: {
  }
  LDR_INST: {
      ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1002,7 +1005,7 @@ index 781ff3d..889076a 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2315,7 @@ LDR_INST: {
+@@ -2146,7 +2318,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1011,7 +1014,7 @@ index 781ff3d..889076a 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2358,7 @@ UXTAH_INST: {
+@@ -2189,7 +2361,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1020,7 +1023,7 @@ index 781ff3d..889076a 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2370,7 @@ LDRB_INST: {
+@@ -2201,7 +2373,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1029,7 +1032,7 @@ index 781ff3d..889076a 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2391,7 @@ LDRD_INST: {
+@@ -2222,7 +2394,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -1038,7 +1041,7 @@ index 781ff3d..889076a 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2466,7 @@ LDREXD_INST: {
+@@ -2297,7 +2469,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1047,7 +1050,7 @@ index 781ff3d..889076a 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2478,7 @@ LDRH_INST: {
+@@ -2309,7 +2481,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1056,7 +1059,7 @@ index 781ff3d..889076a 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2493,7 @@ LDRSB_INST: {
+@@ -2324,7 +2496,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1065,7 +1068,7 @@ index 781ff3d..889076a 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2509,7 @@ LDRSH_INST: {
+@@ -2340,7 +2512,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1074,7 +1077,7 @@ index 781ff3d..889076a 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3734,7 @@ STM_INST: {
+@@ -3565,7 +3737,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -1083,7 +1086,7 @@ index 781ff3d..889076a 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3762,14 @@ STM_INST: {
+@@ -3593,15 +3765,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -1106,7 +1109,7 @@ index 781ff3d..889076a 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3803,7 @@ SXTB_INST: {
+@@ -3635,7 +3806,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1115,7 +1118,7 @@ index 781ff3d..889076a 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3843,7 @@ UXTAB_INST: {
+@@ -3675,7 +3846,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1124,7 +1127,7 @@ index 781ff3d..889076a 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3855,7 @@ STRB_INST: {
+@@ -3687,7 +3858,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1133,7 +1136,7 @@ index 781ff3d..889076a 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3872,7 @@ STRBT_INST: {
+@@ -3704,7 +3875,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1142,7 +1145,7 @@ index 781ff3d..889076a 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +3973,7 @@ STREXH_INST: {
+@@ -3805,7 +3976,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1151,7 +1154,7 @@ index 781ff3d..889076a 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +3986,7 @@ STRH_INST: {
+@@ -3818,7 +3989,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1160,7 +1163,7 @@ index 781ff3d..889076a 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +4039,17 @@ SUB_INST: {
+@@ -3871,11 +4042,17 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1183,7 +1186,7 @@ index 781ff3d..889076a 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4580,6 +4754,332 @@ YIELD_INST: {
+@@ -4580,6 +4757,402 @@ YIELD_INST: {
      GOTO_NEXT_INST;
  }
  
@@ -1513,10 +1516,80 @@ index 781ff3d..889076a 100644
 +    GOTO_NEXT_INST;
 +}
 +
++// Block transfers (ldm_stm_inst). As the generic LDM/STM: the base is written back first, STM
++// stores the old base when it is in the list, PC is stored as PC + 8, and a loaded PC sets the
++// Thumb bit from bit 0. When the whole transfer lies in one plain-memory page it is done with
++// one page lookup instead of one per register.
++LDM_FAST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            const u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                u32 value;
++                std::memcpy(&value, p, sizeof(value));
++                cpu->Reg[std::countr_zero(list)] = value;
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->Reg[std::countr_zero(list)] = cpu->ReadMemory32(vaddr);
++            }
++        }
++        if (inst_cream->list & 0x8000) {
++            cpu->TFlag = cpu->Reg[15] & 0x1;
++            cpu->Reg[15] &= 0xFFFFFFFE;
++            INC_PC(sizeof(ldst_inst));
++            goto DISPATCH;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++STM_FAST_INST: {
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const auto value_of = [cpu, base, rn = inst_cream->Rn](u32 i) {
++            return i == rn ? base : i == 15 ? cpu->Reg[15] + 8 : cpu->Reg[i];
++        };
++        u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                const u32 value = value_of(std::countr_zero(list));
++                std::memcpy(p, &value, sizeof(value));
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->WriteMemory32(vaddr, value_of(std::countr_zero(list)));
++            }
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++
  #define VFP_INTERPRETER_IMPL
  #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
  #undef VFP_INTERPRETER_IMPL
-@@ -4594,3 +5094,7 @@ INIT_INST_LENGTH: {
+@@ -4594,3 +5167,7 @@ INIT_INST_LENGTH: {
      return num_instrs;
  }
  }
@@ -1526,10 +1599,10 @@ index 781ff3d..889076a 100644
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..4f38190
+index 0000000..c5c773c
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,4630 @@
+@@ -0,0 +1,4702 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -1674,6 +1747,8 @@ index 0000000..4f38190
 +static TC_CC unsigned TC_LDR_REG_INST(TC_ARGS);
 +static TC_CC unsigned TC_STR_REG_INST(TC_ARGS);
 +static TC_CC unsigned TC_LDRB_REG_INST(TC_ARGS);
++static TC_CC unsigned TC_LDM_FAST_INST(TC_ARGS);
++static TC_CC unsigned TC_STM_FAST_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS);
 +static TC_CC unsigned TC_VMLS_INST(TC_ARGS);
 +static TC_CC unsigned TC_VNMLA_INST(TC_ARGS);
@@ -1709,7 +1784,7 @@ index 0000000..4f38190
 +static TC_CC unsigned TC_END(TC_ARGS);
 +static TC_CC unsigned TC_INIT_INST_LENGTH(TC_ARGS);
 +
-+static constexpr TcHandler tc_table[228] = {
++static constexpr TcHandler tc_table[230] = {
 +    TC_VMLA_INST,
 +    TC_VMLS_INST,
 +    TC_VNMLA_INST,
@@ -1935,6 +2010,8 @@ index 0000000..4f38190
 +    TC_LDR_REG_INST,
 +    TC_STR_REG_INST,
 +    TC_LDRB_REG_INST,
++    TC_LDM_FAST_INST,
++    TC_STM_FAST_INST,
 +    TC_DISPATCH,
 +    TC_INIT_INST_LENGTH,
 +    TC_END,
@@ -5469,6 +5546,74 @@ index 0000000..4f38190
 +    GOTO_NEXT_INST;
 +}
 +
++static TC_CC unsigned TC_LDM_FAST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            const u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                u32 value;
++                std::memcpy(&value, p, sizeof(value));
++                cpu->Reg[std::countr_zero(list)] = value;
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->Reg[std::countr_zero(list)] = cpu->ReadMemory32(vaddr);
++            }
++        }
++        if (inst_cream->list & 0x8000) {
++            cpu->TFlag = cpu->Reg[15] & 0x1;
++            cpu->Reg[15] &= 0xFFFFFFFE;
++            INC_PC(sizeof(ldst_inst));
++            TC_GOTO_DISPATCH;
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
++static TC_CC unsigned TC_STM_FAST_INST(TC_ARGS) {
++    [[maybe_unused]] unsigned int addr;
++    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
++        const ldm_stm_inst* const inst_cream = (const ldm_stm_inst*)inst_base->component;
++        const u32 base = cpu->Reg[inst_cream->Rn];
++        u32 vaddr = base + inst_cream->start;
++        cpu->Reg[inst_cream->Rn] = base + inst_cream->writeback;
++        u32 list = inst_cream->list;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const auto value_of = [cpu, base, rn = inst_cream->Rn](u32 i) {
++            return i == rn ? base : i == 15 ? cpu->Reg[15] + 8 : cpu->Reg[i];
++        };
++        u8* page = cpu->FastPage(vaddr);
++        if (page && (vaddr & ARMul_State::PAGE_OFFSET_MASK) + bytes <= ARMul_State::PAGE_OFFSET_MASK + 1 &&
++            !cpu->InBigEndianMode()) [[likely]] {
++            u8* p = page + (vaddr & ARMul_State::PAGE_OFFSET_MASK);
++            for (; list != 0; list &= list - 1, p += 4) {
++                const u32 value = value_of(std::countr_zero(list));
++                std::memcpy(p, &value, sizeof(value));
++            }
++        } else {
++            for (; list != 0; list &= list - 1, vaddr += 4) {
++                cpu->WriteMemory32(vaddr, value_of(std::countr_zero(list)));
++            }
++        }
++    }
++    cpu->Reg[15] += 4;
++    INC_PC(sizeof(ldst_inst));
++    FETCH_INST;
++    GOTO_NEXT_INST;
++}
++
 +static TC_CC unsigned TC_VMLA_INST(TC_ARGS) {
 +    [[maybe_unused]] unsigned int addr;
 +    if ((inst_base->cond == ConditionCode::AL) || CondPassed(cpu, inst_base->cond)) {
@@ -6161,7 +6306,7 @@ index 0000000..4f38190
 +#undef TC_GOTO_DISPATCH
 +#undef TC_GOTO_END
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
-index 729c407..10d0ad0 100644
+index 729c407..072c964 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
 @@ -1,4 +1,6 @@
@@ -6216,7 +6361,7 @@ index 729c407..10d0ad0 100644
  
      return inst_base;
  }
-@@ -2016,3 +2049,118 @@ const transop_fp_t arm_instruction_trans[] = {
+@@ -2016,3 +2049,132 @@ const transop_fp_t arm_instruction_trans[] = {
  };
  
  const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / sizeof(transop_fp_t);
@@ -6295,6 +6440,20 @@ index 729c407..10d0ad0 100644
 +    } else if (op == INTERPRETER_TRANSLATE(rsb)) {
 +        if (imm && Rn != 15 && Rd != 15)
 +            set(RSB_IMM_IDX, imm_val);
++    } else if (op == INTERPRETER_TRANSLATE(ldm) || op == INTERPRETER_TRANSLATE(stm)) {
++        // User-bank (^) forms and PC as the base stay generic.
++        const u32 list = BITS(inst, 0, 15);
++        if (BIT(inst, 22) || Rn == 15 || list == 0)
++            return;
++        const u32 bytes = 4 * static_cast<u32>(std::popcount(list));
++        const bool up = BIT(inst, 23), before = BIT(inst, 24);
++        // Same first address as LdnStM(IncrementAfter / IncrementBefore / DecrementAfter /
++        // DecrementBefore).
++        const u32 start = up ? (before ? 4u : 0u) : (before ? 0u - bytes : 4u - bytes);
++        const u32 writeback = !BIT(inst, 21) ? 0u : up ? bytes : 0u - bytes;
++        ldm_stm_inst* cream = (ldm_stm_inst*)inst_base->component;
++        *cream = {list, Rn, start, writeback};
++        inst_base->idx = op == INTERPRETER_TRANSLATE(ldm) ? LDM_IDX : STM_IDX;
 +    } else if (op == INTERPRETER_TRANSLATE(ldr) || op == INTERPRETER_TRANSLATE(ldrcond) ||
 +               op == INTERPRETER_TRANSLATE(str) || op == INTERPRETER_TRANSLATE(ldrb) ||
 +               op == INTERPRETER_TRANSLATE(strb)) {
@@ -6336,7 +6495,7 @@ index 729c407..10d0ad0 100644
 +    }
 +}
 diff --git a/src/core/arm/dyncom/arm_dyncom_trans.h b/src/core/arm/dyncom/arm_dyncom_trans.h
-index e67df42..d2b028b 100644
+index e67df42..79be3cc 100644
 --- a/src/core/arm/dyncom/arm_dyncom_trans.h
 +++ b/src/core/arm/dyncom/arm_dyncom_trans.h
 @@ -4,6 +4,7 @@
@@ -6367,7 +6526,7 @@ index e67df42..d2b028b 100644
  };
  
  struct bx_inst {
-@@ -493,6 +502,72 @@ typedef ARM_INST_PTR (*transop_fp_t)(unsigned int, int);
+@@ -493,6 +502,82 @@ typedef ARM_INST_PTR (*transop_fp_t)(unsigned int, int);
  extern const transop_fp_t arm_instruction_trans[];
  extern const std::size_t arm_instruction_trans_len;
  
@@ -6399,6 +6558,8 @@ index e67df42..d2b028b 100644
 +    LDR_REG_IDX,                     // LDR Rd, [Rn, +-Rm, LSL #n] Rd, Rn, Rm != PC
 +    STR_REG_IDX,
 +    LDRB_REG_IDX,
++    LDM_IDX,                         // LDM{IA,IB,DA,DB} Rn{!}, {list}  (no ^), Rn != PC
++    STM_IDX,                         // STM{IA,IB,DA,DB} Rn{!}, {list}  (no ^), Rn != PC
 +    SPECIAL_INST_END
 +};
 +
@@ -6419,6 +6580,14 @@ index e67df42..d2b028b 100644
 +    u8 subtract;
 +};
 +static_assert(sizeof(ldst_reg_inst) <= sizeof(ldst_inst));
++// Block transfer: the first address is Rn + start, Rn becomes Rn + writeback (0 without !).
++struct ldm_stm_inst {
++    u32 list;
++    u32 Rn;
++    u32 start;
++    u32 writeback;
++};
++static_assert(sizeof(ldm_stm_inst) <= sizeof(ldst_inst));
 +
 +/// After an ARM-mode (not Thumb) instruction at pc is translated: switch it to a specialised
 +/// handler when it has one of the forms above. The generic handler stays for everything else.

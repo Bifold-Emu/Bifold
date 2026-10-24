@@ -70,6 +70,33 @@ __attribute__((noinline)) static u32 run(u32 a, u32 b, u32 c, u32 x, u32* m, u32
     return h;
 }
 
+
+// Block transfers: every addressing mode, writeback, base in the list, PC stored, a transfer
+// that crosses a page boundary (big[] straddles one) and a loaded PC (the return).
+// u32 ldmstm(u32 a, u32 b, u32 c, u32* m)
+__attribute__((aligned(4096))) static u32 big[2048];
+u32 ldmstm(u32 a, u32 b, u32 c, u32* m);
+asm(".text\n.arm\n.global ldmstm\nldmstm:\n"
+    "push {r4-r11, lr}\n"
+    "mov r4, r0\n mov r5, r1\n mov r6, r2\n mov r7, r3\n"
+    "stmia r7, {r4-r6}\n"            // IA, no writeback
+    "ldmib r7, {r8, r9}\n"           // IB: b, c
+    "eor r0, r0, r8, ror #3\n add r0, r0, r9\n"
+    "stmdb r7!, {r4, r5, r6, r8}\n"  // DB with writeback
+    "sub r0, r0, r7\n"
+    "ldmia r7!, {r8-r11}\n"          // IA with writeback
+    "eor r0, r0, r8\n add r0, r0, r9, lsl #1\n eor r0, r0, r10\n sub r0, r0, r11\n add r0, r0, r7\n"
+    "stmda r7, {r0, r1, r7}\n"       // DA, base in the list
+    "ldmda r7, {r8, r9, r10}\n"
+    "add r0, r0, r8\n eor r0, r0, r9\n add r0, r0, r10, lsr #2\n"
+    "mov r8, r7\n mov r9, r6\n stmia r8!, {r8, r9, pc}\n"  // old base stored (lowest), PC as PC + 8
+    "sub r9, r8, r7\n add r0, r0, r9\n"
+    "ldr r9, [r7]\n sub r9, r9, r7\n add r0, r0, r9\n ldr r9, [r7, #4]\n eor r0, r0, r9\n"
+    "ldr r9, [r7, #8]\n adr r10, 1f\n sub r9, r9, r10\n add r0, r0, r9\n1:\n"
+    "cmp r4, r5\n stmdbhi r7, {r4, r5}\n ldmdbhi r7, {r9, r10}\n movls r9, #7\n movls r10, #9\n"
+    "add r0, r0, r9\n eor r0, r0, r10, ror #11\n"
+    "pop {r4-r11, pc}\n");
+
 static void band(u8* fb, u32 rows, u32 hash) {
     for (u32 y = 0; y < rows; ++y) {
         const u32 bit = (hash >> ((y * 32) / rows)) & 1;
@@ -96,6 +123,8 @@ __attribute__((noreturn, section(".text.start"))) void _start(void) {
         const u32 b = (i & 3) == 0 ? a : x;           // equal operands sometimes
         const u32 c = (i & 7) == 1 ? 0 : x * 2654435761u;
         h = run(a, b, c, (x >> 7) & 7, &mem[32 + (i & 15)], h);
+        // big[1024] starts a page: offsets 1016..1032 make some transfers cross it.
+        h = (h ^ ldmstm(a, b, c, &big[1016 + (i & 15)])) * 0x9E3779B1u;
     }
     for (;;) {
         band((u8*)0x1F1E6000, 400, h);
