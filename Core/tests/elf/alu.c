@@ -8,7 +8,7 @@ static u32 mem[64];
 
 #define FOLD "eor %[h], %[t], %[h], ror #7\n\tmrs %[f], cpsr\n\tadd %[h], %[h], %[f], lsr #28\n\t"
 
-__attribute__((noinline)) static u32 run(u32 a, u32 b, u32 c, u32* m, u32 h) {
+__attribute__((noinline)) static u32 run(u32 a, u32 b, u32 c, u32 x, u32* m, u32 h) {
     u32 t = c, f;
     asm volatile(
         "adds %[t], %[a], #0x3fc\n\t" FOLD
@@ -38,9 +38,34 @@ __attribute__((noinline)) static u32 run(u32 a, u32 b, u32 c, u32* m, u32 h) {
         "ldr %[t], =0x12345678\n\t" FOLD
         "cmp %[t], %[a]\n\tldrne %[t], =0xdeadbeef\n\t" FOLD
         "ldr %[t], [%[m], #2]\n\t" FOLD   // unaligned word load
+        "add %[t], %[a], %[b], lsl #3\n\t" FOLD
+        "adds %[t], %[a], %[b], lsr #5\n\t" FOLD
+        "add %[t], %[a], %[b], asr #31\n\t" FOLD
+        "subs %[t], %[a], %[b], lsl #1\n\t" FOLD
+        "sub %[t], %[t], %[c], asr #4\n\t" FOLD
+        "cmp %[a], %[b], lsl #2\n\taddcc %[t], %[t], %[c], lsr #1\n\t" FOLD
+        "cmp %[c], %[a], asr #9\n\tsubge %[t], %[t], %[b], lsl #30\n\t" FOLD
+        "mov %[t], %[a], lsl #7\n\t" FOLD
+        "mov %[t], %[b], asr #3\n\t" FOLD
+        "cmp %[a], #0\n\tmovmi %[t], %[c], lsr #31\n\t" FOLD
+        "orr %[t], %[a], %[b], lsl #16\n\t" FOLD
+        "orr %[t], %[t], %[c], asr #2\n\t" FOLD
+        "and %[t], %[a], #0xff00\n\t" FOLD
+        "orr %[t], %[b], #0x80000001\n\t" FOLD
+        "cmp %[b], %[c]\n\tandhi %[t], %[t], #0xf0\n\torrls %[t], %[t], #0x3c000\n\t" FOLD
+        "rsbs %[t], %[a], #0\n\t" FOLD
+        "rsb %[t], %[b], #0x100\n\t" FOLD
+        "rsbs %[t], %[c], #0x7f000000\n\t" FOLD
+        "str %[a], [%[m], %[x], lsl #2]\n\tldr %[t], [%[m], %[x], lsl #2]\n\t" FOLD
+        "ldr %[t], [%[m], -%[x], lsl #2]\n\t" FOLD
+        "str %[c], [%[m], -%[x], lsl #3]\n\tldr %[t], [%[m], -%[x], lsl #3]\n\t" FOLD
+        "ldr %[t], [%[m], %[x]]\n\t" FOLD
+        "ldrb %[t], [%[m], %[x]]\n\t" FOLD
+        "ldrb %[t], [%[m], -%[x], lsl #1]\n\t" FOLD
+        "cmp %[x], #4\n\tstrgt %[b], [%[m], %[x], lsl #2]\n\tldrle %[t], [%[m], -%[x], lsl #2]\n\t" FOLD
         "b 1f\n\t.ltorg\n1:\n\t"
         : [t] "+&r"(t), [f] "=&r"(f), [h] "+&r"(h)
-        : [a] "r"(a), [b] "r"(b), [c] "r"(c), [m] "r"(m)
+        : [a] "r"(a), [b] "r"(b), [c] "r"(c), [x] "r"(x), [m] "r"(m)
         : "cc", "memory");
     return h;
 }
@@ -70,7 +95,7 @@ __attribute__((noreturn, section(".text.start"))) void _start(void) {
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         const u32 b = (i & 3) == 0 ? a : x;           // equal operands sometimes
         const u32 c = (i & 7) == 1 ? 0 : x * 2654435761u;
-        h = run(a, b, c, &mem[32 + (i & 15)], h);
+        h = run(a, b, c, (x >> 7) & 7, &mem[32 + (i & 15)], h);
     }
     for (;;) {
         band((u8*)0x1F1E6000, 400, h);

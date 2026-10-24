@@ -1537,8 +1537,9 @@ int az_debug_dyncom_tailcall(int set) {
 }
 
 int az_debug_dyncom_link(int set) {
-    if (set >= 0)
-        g_dyncom_link.store(set != 0, std::memory_order_relaxed);
+    if (set >= 0 && g_dyncom_link.exchange(set != 0, std::memory_order_relaxed) != (set != 0)) {
+        g_dyncom_flush_epoch.fetch_add(1, std::memory_order_relaxed); // drops the existing links
+    }
     return g_dyncom_link.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
