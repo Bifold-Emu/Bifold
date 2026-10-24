@@ -35,20 +35,20 @@ final class PlayHistory: ObservableObject {
     static func lastSceneURL(_ titleID: String) -> URL { thumbsDirectory.appendingPathComponent("\(titleID)-last.png") }
     static func slotURL(_ titleID: String, _ slot: Int) -> URL { thumbsDirectory.appendingPathComponent("\(titleID).\(slot).png") }
 
-    func entry(for game: Game) -> Entry? { entries[game.titleIDString] }
+    func entry(for game: Game) -> Entry? { entries[game.historyKey] }
 
     /// The most recently played of `games`.
     func mostRecent(in games: [Game]) -> Game? {
-        games.filter { entries[$0.titleIDString] != nil }
-            .max { entries[$0.titleIDString]!.lastPlayed < entries[$1.titleIDString]!.lastPlayed }
+        games.filter { entries[$0.historyKey] != nil }
+            .max { entries[$0.historyKey]!.lastPlayed < entries[$1.historyKey]!.lastPlayed }
     }
 
     func sessionStarted(_ game: Game) {
         sessionStart = Date()
-        sessionGame = game.titleIDString
-        var e = entries[game.titleIDString] ?? Entry(lastPlayed: Date(), seconds: 0)
+        sessionGame = game.historyKey
+        var e = entries[game.historyKey] ?? Entry(lastPlayed: Date(), seconds: 0)
         e.lastPlayed = Date()
-        entries[game.titleIDString] = e
+        entries[game.historyKey] = e
         save()
     }
 
@@ -77,12 +77,12 @@ final class PlayHistory: ObservableObject {
         guard await EmulatorCore.shared.capture(to: tmp),
               let full = UIImage(contentsOfFile: tmp.path),
               let top = Self.topScreen(of: full) else { return nil }
-        store(top, at: Self.lastSceneURL(game.titleIDString))
+        store(top, at: Self.lastSceneURL(game.historyKey))
         return top
     }
 
     func storeSlotPicture(_ image: UIImage, game: Game, slot: Int) {
-        store(image, at: Self.slotURL(game.titleIDString, slot))
+        store(image, at: Self.slotURL(game.historyKey, slot))
     }
 
     private func store(_ image: UIImage, at url: URL) {
@@ -117,6 +117,7 @@ final class PlayHistory: ObservableObject {
     func saveStates(of game: Game) -> [SlotInfo] {
         let dir = EmulatorCore.shared.userDirectory.appendingPathComponent("states", isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        guard game.supportsSaveStates else { return [] }
         let prefix = game.titleIDString.uppercased() + "."
         return files.compactMap { url -> SlotInfo? in
             let name = url.lastPathComponent.uppercased()

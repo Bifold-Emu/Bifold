@@ -53,6 +53,23 @@ NAME="interpreter: specialised = generic"; check cmp "$TMP/alu1/top.ppm" "$TMP/a
 NAME="interpreter = JIT (alu.elf)";        check cmp "$TMP/alu1/top.ppm" "$TMP/aluj/top.ppm"
 NAME="save state + 3 loads";  check "$T" savestate "$ELF/paint.elf"
 NAME="screenshot (software renderer)"; check sh -c "AZ_TEST_SHOT='$TMP/shot.png' '$T' boot '$ELF/paint.elf' 2 0 | grep -q screenshot=1 && head -c 4 '$TMP/shot.png' | od -An -tx1 | grep -q '89 50 4e 47'"
+# Bundled homebrew (App/Bundled, shipped inside the app): each boots on the interpreter and draws
+# a real top-screen frame (at least 0.5% of pixels differ from the dominant colour). The exit
+# code is ignored: on slow hosts these run below the 30 fps the boot command asks for.
+has_content() {
+  python3 - "$1" <<'EOF'
+import sys, collections
+d = open(sys.argv[1], "rb").read()
+i = d.index(b"255\n") + 4
+px = [d[j:j + 3] for j in range(i, len(d) - 2, 3)]
+sys.exit(0 if 1 - collections.Counter(px).most_common(1)[0][1] / len(px) > 0.005 else 1)
+EOF
+}
+for g in "$ROOT"/App/Bundled/*.3dsx; do
+  n=$(basename "$g" .3dsx); mkdir -p "$TMP/hb-$n"
+  AZ_TEST_USERDIR="$TMP/hbuser" AZ_TEST_DUMP="$TMP/hb-$n" "$T" boot "$g" 8 0 >/dev/null 2>&1 || true
+  NAME="bundled $n draws a frame"; check has_content "$TMP/hb-$n/top.ppm"
+done
 
 # CIA install, update overlay and DLC (test CIAs built by scripts/tools/mkcia.py).
 MK="python3 $ROOT/scripts/tools/mkcia.py"

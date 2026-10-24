@@ -324,6 +324,15 @@ bool az_init(const char* user_dir, const char* vulkan_library_path) {
     FileUtil::CreateFullPath(FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir));
     FileUtil::CreateFullPath(FileUtil::GetUserPath(FileUtil::UserPath::NANDDir));
     FileUtil::CreateFullPath(FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir));
+    // Homebrew that plays sound (libctru's ndsp) first loads sdmc:/3ds/dspfirm.cdc, a dump of the
+    // console's DSP firmware, and runs without audio if it is missing. The HLE DSP never runs the
+    // firmware (DspHle::LoadComponent only logs a hash), so a placeholder of our own is enough; a
+    // file the player put there is left alone.
+    if (const std::string dsp = FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir) + "3ds/dspfirm.cdc";
+        !FileUtil::Exists(dsp)) {
+        FileUtil::CreateFullPath(dsp);
+        FileUtil::WriteStringToFile(false, dsp, "Bifold: placeholder for the HLE DSP, not firmware\n");
+    }
 
     Common::Log::Initialize();
     Common::Log::Start();

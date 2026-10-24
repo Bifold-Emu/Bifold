@@ -8,6 +8,8 @@ struct SettingsView: View {
     @ObservedObject private var s = AppSettings.shared
     @ObservedObject private var core = EmulatorCore.shared
     @Environment(\.dismiss) private var dismiss
+    /// -uiDemo bundled: open the bundled-games page at launch (UI screenshots).
+    @State private var demoBundled = UserDefaults.standard.string(forKey: "uiDemo") == "bundled"
 
     var body: some View {
         List {
@@ -24,6 +26,9 @@ struct SettingsView: View {
                 row("主机与系统文件", "cpu", 0x5B6B82, s.isNew3DS ? "New 3DS" : "3DS") { SystemSettings() }
                 row("联机", "person.2.wave.2.fill", 0x2E9BC2, s.nickname) { MultiplayerSettings() }
                 row("导入与安装", "tray.and.arrow.down.fill", 0x6E7787, s.deleteCIAAfterInstall ? "删除原 CIA" : "保留原 CIA") { ImportSettings() }
+                if !BundledCatalog.all.isEmpty {
+                    row("预置自制游戏", "gift.fill", 0xC2577A, bundledSummary) { BundledGamesView() }
+                }
             }
             Section {
                 row("开发者选项", "hammer.fill", 0x6E7787, s.perfOverlay.shortTitle) { DeveloperSettings() }
@@ -33,12 +38,18 @@ struct SettingsView: View {
         .themedList()
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(isTab ? .large : .inline)
+        .navigationDestination(isPresented: $demoBundled) { BundledGamesView() }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if !isTab { Button("完成") { dismiss() } }
             }
         }
         .onDisappear { core.reloadSettings() }
+    }
+
+    private var bundledSummary: String {
+        let hidden = BundledCatalog.all.filter { BundledCatalog.hidden.contains($0.file) }.count
+        return hidden == 0 ? "\(BundledCatalog.all.count) 个" : "已移除 \(hidden) 个"
     }
 
     private func row<D: View>(_ title: String, _ icon: String, _ color: UInt32, _ value: String?,
@@ -321,10 +332,77 @@ private struct AboutView: View {
                 Link("Bifold 源代码", destination: URL(string: "https://github.com/Bifold-Emu/Bifold")!)
                 Link("Azahar 项目", destination: URL(string: "https://github.com/azahar-emu/azahar")!)
             } footer: {
-                Text("Bifold 基于 Azahar 模拟器（Citra 的后继项目），以 GNU GPL 授权，源代码公开。Bifold 不包含任何游戏、系统固件或密钥。请只运行你合法拥有的游戏。Nintendo 3DS 是任天堂的商标；Bifold 与任天堂没有任何关系。")
+                Text("Bifold 基于 Azahar 模拟器（Citra 的后继项目），以 GNU GPL 授权，源代码公开。除了几款开源免费的自制游戏（见 设置 › 预置自制游戏），Bifold 不包含任何游戏、系统固件或密钥。请只运行你合法拥有的游戏。Nintendo 3DS 是任天堂的商标；Bifold 与任天堂没有任何关系。")
             }
         }
         .tint(Theme.accent).themedList().navigationTitle("关于 Bifold")
+    }
+}
+
+// MARK: - Bundled homebrew
+
+/// The free games inside the app: who made them, their licenses and sources (which their licenses
+/// ask us to show), and a way to bring back the ones removed from the library.
+private struct BundledGamesView: View {
+    @ObservedObject private var library = GameLibrary.shared
+    @State private var hidden = BundledCatalog.hidden
+
+    var body: some View {
+        ThemedForm {
+            Section {
+                ForEach(BundledCatalog.all) { g in
+                    NavigationLink { BundledGameDetail(game: g) } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(g.title).font(.body.weight(.semibold))
+                                if hidden.contains(g.file) {
+                                    Text("已移除").font(.caption2.weight(.bold)).foregroundStyle(Theme.secondaryText)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Theme.raised, in: Capsule())
+                                }
+                            }
+                            Text("\(g.author) · \(g.license)").font(.footnote).foregroundStyle(Theme.secondaryText)
+                        }
+                    }
+                }
+            } footer: {
+                Text("这些游戏由各自的作者以开源许可发布，Bifold 原样附带，方便你直接试玩。它们与任天堂没有关系。在游戏库里长按可以移除；文件是 App 的一部分，移除只是不再显示。")
+            }
+            if !hidden.isEmpty {
+                Section {
+                    Button("在游戏库中恢复全部（\(hidden.count) 个）") {
+                        library.restoreBundledGames()
+                        hidden = []
+                    }
+                }
+            }
+        }
+        .tint(Theme.accent).themedList().navigationTitle("预置自制游戏")
+        .onAppear { hidden = BundledCatalog.hidden }
+    }
+}
+
+private struct BundledGameDetail: View {
+    let game: BundledGame
+    var body: some View {
+        ThemedForm {
+            Section {
+                LabeledContent("作者", value: game.author)
+                LabeledContent("许可证", value: game.license)
+                if let url = URL(string: game.source) { Link("源代码", destination: url) }
+            } footer: {
+                Text(game.about)
+            }
+            if let notes = game.notes {
+                Section("素材与其他说明") { Text(notes).font(.footnote) }
+            }
+            Section("许可证全文") {
+                Text(BundledCatalog.licenseText(of: game))
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+        .tint(Theme.accent).themedList().navigationTitle(game.title)
     }
 }
 

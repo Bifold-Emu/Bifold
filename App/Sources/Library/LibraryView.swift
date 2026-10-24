@@ -38,7 +38,7 @@ struct RootView: View {
             RemotePlay.startIfRequested()
             // -uiDemo settings|multiplayer: open a tab at launch (UI screenshots).
             switch UserDefaults.standard.string(forKey: "uiDemo") {
-            case "settings": tab = .settings
+            case "settings", "bundled": tab = .settings
             case "multiplayer": tab = .multiplayer
             default: break
             }
@@ -59,39 +59,44 @@ struct LibraryView: View {
     private var filtered: [Game] {
         search.isEmpty ? library.games : library.games.filter { $0.title.localizedCaseInsensitiveContains(search) }
     }
+    private var mine: [Game] { filtered.filter { !$0.isBundled } }
+    private var bundled: [Game] { filtered.filter { $0.isBundled } }
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if library.games.isEmpty && !library.isScanning {
+                    if search.isEmpty, let recent = history.mostRecent(in: library.games) {
+                        ContinueCard(game: recent, play: play)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 4)
+                    }
+                    let ownGames = library.games.contains { !$0.isBundled }
+                    if !ownGames && !library.isScanning && search.isEmpty {
                         EmptyLibraryView { showImporter = true }
-                            .padding(.top, 40)
-                    } else {
-                        if search.isEmpty, let recent = history.mostRecent(in: library.games) {
-                            ContinueCard(game: recent, play: play)
-                                .padding(.horizontal, 16)
-                                .padding(.top, 4)
-                        }
-                        HStack(alignment: .firstTextBaseline) {
-                            Text("全部游戏").font(.system(size: 20, weight: .heavy, design: .rounded))
-                            Spacer()
-                            Text("\(filtered.count) 个").font(.subheadline).foregroundStyle(Theme.secondaryText)
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.top, 24)
-                        .padding(.bottom, 10)
-                        LazyVGrid(columns: columns, spacing: 14) {
-                            ForEach(filtered) { game in
-                                Button { play(PlayRequest(game: game)) } label: { GameCard(game: game) }
-                                    .buttonStyle(.plain)
-                                    .contextMenu { menu(for: game) }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 24)
+                            .padding(.top, library.games.isEmpty ? 40 : 12)
+                    }
+                    if !mine.isEmpty {
+                        header(bundled.isEmpty ? "全部游戏" : "我的游戏", count: mine.count)
+                        grid(mine)
+                    }
+                    if !bundled.isEmpty {
+                        header("预置自制游戏", count: bundled.count,
+                               note: "开源免费的自制游戏，可以长按从游戏库移除")
+                            .id("bundledSection")
+                        grid(bundled)
                     }
                 }
+            }
+            #if DEBUG
+            .onAppear {
+                // -uiDemo bundledlib: scroll to the bundled games (UI screenshots).
+                if UserDefaults.standard.string(forKey: "uiDemo") == "bundledlib" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { proxy.scrollTo("bundledSection", anchor: .top) }
+                }
+            }
+            #endif
             }
             .pageBackground()
             .refreshable { library.refresh() }
@@ -112,13 +117,47 @@ struct LibraryView: View {
         }
     }
 
+    private func header(_ title: String, count: Int, note: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.system(size: 20, weight: .heavy, design: .rounded))
+                Spacer()
+                Text("\(count) 个").font(.subheadline).foregroundStyle(Theme.secondaryText)
+            }
+            if let note { Text(note).font(.footnote).foregroundStyle(Theme.secondaryText) }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 24)
+        .padding(.bottom, 10)
+    }
+
+    private func grid(_ games: [Game]) -> some View {
+        LazyVGrid(columns: columns, spacing: 14) {
+            ForEach(games) { game in
+                Button { play(PlayRequest(game: game)) } label: { GameCard(game: game) }
+                    .buttonStyle(.plain)
+                    .contextMenu { menu(for: game) }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
     @ViewBuilder private func menu(for game: Game) -> some View {
-        Text(game.titleIDString)
-        Text(game.fileType)
-        if let v = game.updateVersion { Text("已安装更新 \(Game.versionString(v))") }
-        if game.hasDLC { Text("已安装 DLC") }
-        if !game.isInstalledTitle {
-            Button("删除", role: .destructive) { library.delete(game) }
+        if let b = game.bundled {
+            Text("\(b.author) · \(b.license)")
+            if let url = URL(string: b.source) {
+                Link(destination: url) { Label("源代码", systemImage: "chevron.left.forwardslash.chevron.right") }
+            }
+            Button(role: .destructive) { library.delete(game) } label: { Label("从游戏库移除", systemImage: "eye.slash") }
+        } else {
+            Text(game.titleIDString)
+            Text(game.fileType)
+            if let v = game.updateVersion { Text("已安装更新 \(Game.versionString(v))") }
+            if game.hasDLC { Text("已安装 DLC") }
+            if !game.isInstalledTitle {
+                Button("删除", role: .destructive) { library.delete(game) }
+            }
         }
     }
 
@@ -198,7 +237,7 @@ private struct ContinueCard: View {
 
     @ViewBuilder private var scene: some View {
         let _ = history.pictureVersion
-        if let img = UIImage(contentsOfFile: PlayHistory.lastSceneURL(game.titleIDString).path) {
+        if let img = UIImage(contentsOfFile: PlayHistory.lastSceneURL(game.historyKey).path) {
             Image(uiImage: img).resizable().interpolation(.medium).scaledToFill()
         } else {
             ZStack {
@@ -222,6 +261,14 @@ private struct GameCard: View {
             }
             .aspectRatio(1, contentMode: .fit)
             .clipped()
+            .overlay(alignment: .bottomLeading) {
+                if game.isBundled {
+                    Text("预置").font(.system(size: 10.5, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2.5)
+                        .background(.black.opacity(0.45), in: Capsule())
+                        .padding(6)
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if game.encrypted {
                     Image(systemName: "lock.fill").font(.caption2.bold()).foregroundStyle(.white)
@@ -249,6 +296,7 @@ private struct GameCard: View {
     private var subtitle: String? {
         let parts = [game.updateVersion.map { "更新 \(Game.versionString($0))" }, game.hasDLC ? "DLC" : nil].compactMap { $0 }
         if !parts.isEmpty { return parts.joined(separator: "  ") }
+        if let b = game.bundled { return b.author }
         return game.isInstalledTitle ? nil : game.fileType
     }
 }

@@ -275,5 +275,6 @@ xcrun lldb --batch -o "device select <设备ID>" -o "device process attach --pid
 GPL-2.0-or-later，与 Azahar 相同（见 `LICENSE.txt`）。分发编译好的 App（包括 IPA）时，必须同时提供对应的完整源代码。
 
 - 源码仓库：<https://github.com/Bifold-Emu/Bifold>。仓库里只有本项目的代码和对 Azahar 及其子模块的补丁（`patches/`）；Azahar 源码由 `scripts/bootstrap.sh` 按固定版本下载，然后打上补丁。所以某个版本的 App 对应的源码，就是同一个提交的本仓库加上 bootstrap 里写明的 Azahar 版本。
-- 本项目不包含、也不会下载任何游戏、系统固件或密钥。
+- 除了下面这几款开源免费的自制游戏，本项目不包含、也不会下载任何游戏、系统固件或密钥。
+- App 里附带 6 款自制游戏（`App/Bundled/`，共约 2.5 MB），由各自的作者以开源许可发布，原样附带：2048（MIT）、Anarch（CC0）、Craftus Reloaded（MIT，纹理 XSSheep CC BY-SA）、HexIsoPath（MIT）、StarCruiser7（MIT）、Yahtzee3DS（GPL-3.0）。作者、许可证全文和源代码地址见 `App/Bundled/catalog.json` 和 `App/Bundled/licenses/`，App 内在「设置 › 预置自制游戏」。
 - Nintendo 3DS 是任天堂的商标。本项目与任天堂无关，也未获其授权或认可。

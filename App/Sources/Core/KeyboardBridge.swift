@@ -47,6 +47,9 @@ enum KeyboardBridge {
                 request.button = Int32(max(buttonCount - 1, 0))
                 request.semaphore.signal()
             })
+            // Already answered or cancelled before the alert got here: nothing to show.
+            lock.lock(); let stillPending = pending === request; lock.unlock()
+            guard stillPending else { return }
             guard let top = UIApplication.shared.topViewController else {
                 request.semaphore.signal()
                 return
@@ -59,6 +62,26 @@ enum KeyboardBridge {
         lock.lock(); if pending === request { pending = nil }; lock.unlock()
         outButton?.pointee = request.button
         return strdup(request.text) // freed by the core with free()
+    }
+
+    /// Whether a game is waiting for keyboard input (the emulation thread is blocked meanwhile).
+    static var isOpen: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pending != nil
+    }
+
+    /// Answers an open keyboard as if the player typed `text` and tapped 确定 (remote tests).
+    @discardableResult
+    static func answer(_ text: String) -> Bool {
+        lock.lock()
+        let request = pending
+        pending = nil
+        lock.unlock()
+        guard let request else { return false }
+        request.text = text
+        request.semaphore.signal()
+        DispatchQueue.main.async { request.alert?.dismiss(animated: false) }
+        return true
     }
 
     /// Unblocks the emulation thread if a keyboard is open (answers "cancel"/default).

@@ -11,6 +11,7 @@
 // User directory: $AZ_TEST_USERDIR (default /tmp/azios-test-user).
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -88,9 +89,37 @@ int CmdBoot(const char* path, int seconds, bool jit) {
     std::atomic<int> result{-1};
     std::thread emu([&] { result = static_cast<int>(az_run_game(path)); });
 
+    // AZ_TEST_TOUCHES="ms:x:y,...": taps on the bottom screen (3DS coordinates, 320x240) at the
+    // given times after boot, to drive homebrew menus in tests.
+    std::vector<std::array<int, 3>> taps;
+    if (const char* t = std::getenv("AZ_TEST_TOUCHES")) {
+        std::string spec(t);
+        for (std::size_t p = 0; p < spec.size();) {
+            std::size_t e = spec.find(',', p);
+            if (e == std::string::npos)
+                e = spec.size();
+            std::array<int, 3> v{};
+            if (std::sscanf(spec.substr(p, e - p).c_str(), "%d:%d:%d", &v[0], &v[1], &v[2]) == 3)
+                taps.push_back(v);
+            p = e + 1;
+        }
+    }
+    std::size_t next_tap = 0;
     AZPerfStats best{};
     for (int i = 0; i < seconds * 2; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        while (next_tap < taps.size() && taps[next_tap][0] <= (i + 1) * 500) {
+            AZScreenRect top{}, bottom{};
+            if (az_get_screen_rects(&top, &bottom)) {
+                const float x = bottom.x + taps[next_tap][1] * bottom.width / 320.0f;
+                const float y = bottom.y + taps[next_tap][2] * bottom.height / 240.0f;
+                const bool hit = az_touch_begin(x, y);
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                az_touch_end();
+                std::printf("tap %d,%d hit=%d\n", taps[next_tap][1], taps[next_tap][2], hit);
+            }
+            ++next_tap;
+        }
         AZPerfStats s;
         if (az_get_perf_stats(&s)) {
             std::printf("t=%.1fs system_fps=%.1f speed=%.0f%% frametime=%.2fms\n", (i + 1) / 2.0,

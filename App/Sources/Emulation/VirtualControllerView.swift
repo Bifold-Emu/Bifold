@@ -19,6 +19,18 @@ final class VirtualControllerView: UIView {
         let text = CATextLayer()
         let knob = CAShapeLayer() // circle pad thumb
         let arms = CAShapeLayer() // d-pad: the pressed directions only
+        // D-pad depth: a side under the top face (a lighter grey than the background, so it
+        // shows on black), the top face with a light-to-dark gradient, a darker dimple in the
+        // middle and an arrow on each arm.
+        let side = CAShapeLayer()
+        let face = CAGradientLayer()
+        let faceMask = CAShapeLayer()
+        let marks = CAShapeLayer()
+        let dimple = CAShapeLayer()
+        /// A/B/X/Y use the side and face too: how far the face sinks when pressed, and where the
+        /// label sits when it is up.
+        var travel: CGFloat = 0
+        var textFrame: CGRect = .zero
         /// D-pad directions held: 0 right, 1 up, 2 left, 3 down.
         var dirs = Set<Int>() { didSet { if dirs != oldValue { refresh() } } }
         var pressed = false { didSet { if pressed != oldValue { refresh() } } }
@@ -43,6 +55,24 @@ final class VirtualControllerView: UIView {
             knob.shadowOpacity = 0.5
             knob.shadowRadius = 3
             knob.shadowOffset = CGSize(width: 0, height: 3)
+            side.fillColor = UIColor(hex: 0x2C3546).cgColor
+            side.strokeColor = UIColor(white: 0, alpha: 0.6).cgColor
+            side.lineWidth = 1
+            face.colors = [UIColor(hex: 0x8190AB).cgColor, UIColor(hex: 0x5B6984).cgColor, UIColor(hex: 0x465269).cgColor]
+            face.locations = [0, 0.55, 1]
+            face.mask = faceMask
+            marks.fillColor = UIColor(white: 1, alpha: 0.38).cgColor
+            marks.strokeColor = UIColor(white: 0, alpha: 0.25).cgColor
+            marks.lineWidth = 1
+            dimple.fillColor = UIColor(hex: 0x3F4A60).cgColor
+            dimple.strokeColor = UIColor(white: 1, alpha: 0.22).cgColor
+            dimple.lineWidth = 1
+        }
+
+        /// A, B, X, Y: drawn like the d-pad (side, gradient face), the face sinks when pressed.
+        var isFaceButton: Bool {
+            if case .button(let b) = kind { return [AZ_BUTTON_A, AZ_BUTTON_B, AZ_BUTTON_X, AZ_BUTTON_Y].contains(b) }
+            return false
         }
 
         var isRound: Bool {
@@ -56,16 +86,41 @@ final class VirtualControllerView: UIView {
             shape.frame = frame
             switch kind {
             case .dpad:
-                shape.path = Self.crossPath(in: bounds).cgPath
+                let cross = Self.crossPath(in: bounds)
+                shape.path = cross
                 arms.frame = frame
+                // The side shows below the face, as deep as a key travels (about 5 pt).
+                let depth = min(7, max(5, (frame.width * 0.055).rounded()))
+                side.frame = frame.offsetBy(dx: 0, dy: depth)
+                side.path = cross
+                face.frame = frame
+                faceMask.frame = bounds
+                faceMask.path = cross
+                marks.frame = frame
+                marks.path = Self.arrowsPath(in: bounds)
+                let t = bounds.width / 3
+                dimple.frame = frame
+                dimple.path = CGPath(ellipseIn: CGRect(x: bounds.midX - t * 0.3, y: bounds.midY - t * 0.3,
+                                                       width: t * 0.6, height: t * 0.6), transform: nil)
             default:
                 shape.path = (isRound ? UIBezierPath(ovalIn: bounds)
                                       : UIBezierPath(roundedRect: bounds, cornerRadius: min(bounds.height / 2, 12))).cgPath
+                if isFaceButton {
+                    // Same depth as the d-pad side (about 5 pt).
+                    let depth = min(7, max(5, (frame.width * 0.08).rounded()))
+                    travel = (depth * 0.6).rounded()
+                    side.frame = frame.offsetBy(dx: 0, dy: depth)
+                    side.path = shape.path
+                    face.frame = frame
+                    faceMask.frame = bounds
+                    faceMask.path = shape.path
+                }
             }
             shape.shadowPath = shape.path
             let fontSize = max(10, min(frame.height * (frame.width > frame.height * 1.6 ? 0.42 : 0.4), 22))
             text.fontSize = fontSize
-            text.frame = CGRect(x: frame.minX, y: frame.midY - fontSize * 0.65, width: frame.width, height: fontSize * 1.3)
+            textFrame = CGRect(x: frame.minX, y: frame.midY - fontSize * 0.65, width: frame.width, height: fontSize * 1.3)
+            text.frame = textFrame
             if case .dpad = kind { text.isHidden = true }
             if case .circlePad = kind {
                 text.isHidden = true
@@ -84,13 +139,30 @@ final class VirtualControllerView: UIView {
             // against dark game scenes; a pressed key turns amber (the app's action colour).
             let isDpad: Bool = { if case .dpad = kind { return true }; return false }()
             if isDpad {
-                // The cross stays put; only the arms being pressed light up.
-                shape.fillColor = UIColor(hex: 0x5A6880, alpha: 0.92).cgColor
-                shape.strokeColor = UIColor(white: 1, alpha: 0.32).cgColor
+                // The cross stays put; only the arms being pressed light up. The face is drawn by
+                // the gradient layer; this layer only adds a light rim on top.
+                shape.fillColor = UIColor.clear.cgColor
+                shape.strokeColor = UIColor(white: 1, alpha: 0.42).cgColor
                 shape.lineWidth = 1.5
-                shape.shadowOffset = CGSize(width: 0, height: 3)
+                shape.shadowOpacity = 0
                 arms.fillColor = UIColor(hex: 0xFFB24A).cgColor
                 arms.path = Self.armsPath(dirs, in: CGRect(origin: .zero, size: frame.size)).cgPath
+                CATransaction.commit()
+                return
+            }
+            if isFaceButton {
+                // The face (gradient) and its rim and label move down onto the side when pressed.
+                let dy = pressed ? travel : 0
+                face.frame = frame.offsetBy(dx: 0, dy: dy)
+                shape.frame = face.frame
+                text.frame = textFrame.offsetBy(dx: 0, dy: dy)
+                face.colors = (pressed ? [0xFFC566, 0xF5A43A, 0xD9861C] : [0x8190AB, 0x5B6984, 0x465269])
+                    .map { UIColor(hex: UInt32($0)).cgColor }
+                shape.fillColor = UIColor.clear.cgColor
+                shape.strokeColor = UIColor(white: 1, alpha: pressed ? 0.6 : 0.42).cgColor
+                shape.lineWidth = 1.5
+                shape.shadowOpacity = 0
+                text.foregroundColor = (pressed ? UIColor(hex: 0x2B1B00) : UIColor.white).cgColor
                 CATransaction.commit()
                 return
             }
@@ -129,22 +201,40 @@ final class VirtualControllerView: UIView {
             return p
         }
 
-        static func crossPath(in r: CGRect) -> UIBezierPath {
+        /// The cross, with rounded arm ends and slightly rounded inner corners.
+        static func crossPath(in r: CGRect) -> CGPath {
             let t = r.width / 3
-            let p = UIBezierPath()
-            p.move(to: CGPoint(x: t, y: 0))
-            p.addLine(to: CGPoint(x: 2 * t, y: 0))
-            p.addLine(to: CGPoint(x: 2 * t, y: t))
-            p.addLine(to: CGPoint(x: r.width, y: t))
-            p.addLine(to: CGPoint(x: r.width, y: 2 * t))
-            p.addLine(to: CGPoint(x: 2 * t, y: 2 * t))
-            p.addLine(to: CGPoint(x: 2 * t, y: r.height))
-            p.addLine(to: CGPoint(x: t, y: r.height))
-            p.addLine(to: CGPoint(x: t, y: 2 * t))
-            p.addLine(to: CGPoint(x: 0, y: 2 * t))
-            p.addLine(to: CGPoint(x: 0, y: t))
-            p.addLine(to: CGPoint(x: t, y: t))
-            p.close()
+            let pts: [CGPoint] = [
+                CGPoint(x: t, y: 0), CGPoint(x: 2 * t, y: 0), CGPoint(x: 2 * t, y: t),
+                CGPoint(x: r.width, y: t), CGPoint(x: r.width, y: 2 * t), CGPoint(x: 2 * t, y: 2 * t),
+                CGPoint(x: 2 * t, y: r.height), CGPoint(x: t, y: r.height), CGPoint(x: t, y: 2 * t),
+                CGPoint(x: 0, y: 2 * t), CGPoint(x: 0, y: t), CGPoint(x: t, y: t),
+            ]
+            // Corners 2, 5, 8 and 11 are the inner (concave) ones.
+            let outer = t * 0.22, inner = t * 0.12
+            let p = CGMutablePath()
+            p.move(to: CGPoint(x: (pts[0].x + pts[1].x) / 2, y: pts[0].y))
+            for i in 1...12 {
+                let corner = pts[i % 12], next = pts[(i + 1) % 12]
+                p.addArc(tangent1End: corner, tangent2End: next, radius: i % 3 == 2 ? inner : outer)
+            }
+            p.closeSubpath()
+            return p
+        }
+
+        /// A small arrow on each arm.
+        static func arrowsPath(in r: CGRect) -> CGPath {
+            let t = r.width / 3, c = CGPoint(x: r.midX, y: r.midY)
+            let p = CGMutablePath()
+            let s = t * 0.2, d = t * 1.05 // arrow half-size, distance of its tip from the centre
+            for (dx, dy) in [(CGFloat(1), CGFloat(0)), (0, -1), (-1, 0), (0, 1)] {
+                let tip = CGPoint(x: c.x + dx * d, y: c.y + dy * d)
+                let back = CGPoint(x: c.x + dx * (d - s * 1.3), y: c.y + dy * (d - s * 1.3))
+                p.move(to: tip)
+                p.addLine(to: CGPoint(x: back.x + dy * s, y: back.y + dx * s))
+                p.addLine(to: CGPoint(x: back.x - dy * s, y: back.y - dx * s))
+                p.closeSubpath()
+            }
             return p
         }
     }
@@ -183,7 +273,18 @@ final class VirtualControllerView: UIView {
             layer.addSublayer(c.shape)
             layer.addSublayer(c.text)
             if case .circlePad = c.kind { layer.addSublayer(c.knob) }
-            if case .dpad = c.kind { layer.addSublayer(c.arms) }
+            if c.isFaceButton {
+                layer.insertSublayer(c.side, below: c.shape)
+                layer.insertSublayer(c.face, below: c.shape)
+            }
+            if case .dpad = c.kind {
+                // Under the outline: the side, then the face. Over it: the marks, the pressed arms.
+                layer.insertSublayer(c.side, below: c.shape)
+                layer.insertSublayer(c.face, below: c.shape)
+                layer.addSublayer(c.dimple)
+                layer.addSublayer(c.marks)
+                layer.addSublayer(c.arms)
+            }
         }
     }
 
@@ -250,11 +351,11 @@ final class VirtualControllerView: UIView {
             // Left column: circle pad above the d-pad. Right: ABXY. Centre column (between them):
             // HOME, START, SELECT stacked, so nothing overlaps on narrow phones.
             let controlsTop = top + shoulderH + margin
-            // The circle pad is smaller than the d-pad (it used to be pad * 0.9, big enough that
-            // thumbs strayed onto the buttons around it); the d-pad keeps its old size. Both are
-            // centred in the left column.
+            // The circle pad is 75% of its first size (pad * 0.9, big enough that thumbs strayed
+            // onto the buttons around it) and smaller than the d-pad, which keeps its size. Both
+            // are centred in the left column.
             let avail = b.maxY - controlsTop - margin
-            let stick = min(pad * 0.72, avail * 0.42)
+            let stick = min(pad * 0.675, avail * 0.39)
             let dpadSize = min(pad * 0.765, avail * 0.442)
             let column = max(stick, dpadSize)
             place(.circlePad, CGRect(x: leftX + (column - stick) / 2, y: controlsTop, width: stick, height: stick))

@@ -29,6 +29,9 @@ targets:
     sources:
       - path: App/Sources
       - path: App/Resources
+      # Free homebrew games shipped with the app, kept as a folder (Bundled/ in the app bundle).
+      - path: App/Bundled
+        type: folder
       - path: Core/include
         buildPhase: none
     settings:

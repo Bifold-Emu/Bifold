@@ -16,6 +16,18 @@ struct Game: Identifiable, Hashable {
     var updateVersion: UInt16?
     /// Installed add-on content (0004008C…) for this game.
     var hasDLC = false
+    /// Set for the free games that ship inside the app (see BundledCatalog).
+    var bundled: BundledGame?
+
+    var isBundled: Bool { bundled != nil }
+    /// Azahar's .3dsx loader reports no title ID, so all homebrew has ID 0. Play history and
+    /// pictures are keyed by file name for those, or every homebrew game would share one entry.
+    var historyKey: String {
+        titleID != 0 ? titleIDString : "3DSX-" + url.deletingPathExtension().lastPathComponent
+    }
+    /// The core names save-state files by title ID, so with ID 0 every homebrew game would read
+    /// and overwrite the same files (and could load another game's state). Off for those.
+    var supportsSaveStates: Bool { titleID != 0 }
 
     var id: String { url.path }
     var titleIDString: String { String(format: "%016llX", titleID) }
@@ -108,6 +120,7 @@ final class GameLibrary: ObservableObject {
         let canInstall = !az_is_running()
         let deleteAfterInstall = AppSettings.shared.deleteCIAAfterInstall
         let known = Dictionary(games.map { ($0.uniqueID, $0.title) }, uniquingKeysWith: { a, _ in a })
+        let hiddenBundled = BundledCatalog.hidden
         Task.detached(priority: .userInitiated) {
             let report = await GameLibrary.autoImport(canInstall: canInstall, deleteAfterInstall: deleteAfterInstall,
                                                       knownTitles: known)
@@ -144,6 +157,13 @@ final class GameLibrary: ObservableObject {
                     found[i].updateVersion = a.update
                     found[i].hasDLC = a.dlc
                 }
+            }
+            // Free games inside the app bundle, unless the player removed them from the library.
+            for b in BundledCatalog.all where !hiddenBundled.contains(b.file) {
+                guard let url = BundledCatalog.url(of: b), var g = GameLibrary.loadInfo(url, installed: false) else { continue }
+                g = Game(url: g.url, title: b.title, publisher: b.author, titleID: g.titleID, fileType: g.fileType,
+                         encrypted: false, icon: g.icon, isInstalledTitle: false, bundled: b)
+                found.append(g)
             }
             found.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
             let result = found
@@ -425,7 +445,19 @@ final class GameLibrary: ObservableObject {
 
     func delete(_ game: Game) {
         guard !game.isInstalledTitle else { return }
-        try? FileManager.default.removeItem(at: game.url)
+        if let b = game.bundled {
+            // Part of the signed app: hide it instead (Settings can show it again).
+            BundledCatalog.setHidden(BundledCatalog.hidden.union([b.file]))
+            games.removeAll { $0.url == game.url }
+            post("已从游戏库移除 \(game.title)。可在 设置 › 预置自制游戏 里恢复")
+        } else {
+            try? FileManager.default.removeItem(at: game.url)
+        }
+        refresh()
+    }
+
+    func restoreBundledGames() {
+        BundledCatalog.setHidden([])
         refresh()
     }
 

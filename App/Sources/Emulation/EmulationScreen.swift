@@ -102,7 +102,7 @@ struct EmulationScreen: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 25) { openMenu() }
             }
             #endif
-            if case .running = state, let slot = loadSlot, !didLoadSlot {
+            if case .running = state, let slot = loadSlot, !didLoadSlot, game.supportsSaveStates {
                 didLoadSlot = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     core.loadState(slot: slot)
@@ -242,7 +242,7 @@ struct EmulationScreen: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     core.saveState(slot: slot)
                     if let picture { PlayHistory.shared.storeSlotPicture(picture, game: game, slot: slot) }
-                    else { try? FileManager.default.removeItem(at: PlayHistory.slotURL(game.titleIDString, slot)) }
+                    else { try? FileManager.default.removeItem(at: PlayHistory.slotURL(game.historyKey, slot)) }
                     show("已存到位置 \(slot)")
                 }
             },
@@ -376,19 +376,30 @@ private struct PausePanel: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("即时存档").font(.system(size: 17, weight: .heavy, design: .rounded))
                 Spacer()
-                Text("点按读取 · 长按覆盖").font(.caption).foregroundStyle(Theme.secondaryText)
+                if game.supportsSaveStates {
+                    Text("点按读取 · 长按覆盖").font(.caption).foregroundStyle(Theme.secondaryText)
+                }
             }
             .padding(.bottom, 8)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    newSlotTile
-                    ForEach(slots.sorted { $0.value > $1.value }, id: \.key) { slot, date in
-                        slotTile(slot, date: date)
+            if game.supportsSaveStates {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        newSlotTile
+                        ForEach(slots.sorted { $0.value > $1.value }, id: \.key) { slot, date in
+                            slotTile(slot, date: date)
+                        }
                     }
+                    .padding(.trailing, 18)
                 }
-                .padding(.trailing, 18)
+                .padding(.trailing, -18)
+            } else {
+                // .3dsx homebrew has no title ID, and the core names state files by it.
+                Text("自制 .3dsx 游戏没有 Title ID，暂不支持即时存档。请用游戏自己的存档功能。")
+                    .font(.footnote).foregroundStyle(Theme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Theme.raised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
-            .padding(.trailing, -18)
 
             VStack(spacing: 0) {
                 Divider().overlay(Theme.separator)
@@ -464,7 +475,7 @@ private struct PausePanel: View {
 
     private func slotTile(_ slot: Int, date: Date) -> some View {
         let _ = history.pictureVersion
-        let pic = UIImage(contentsOfFile: PlayHistory.slotURL(game.titleIDString, slot).path)
+        let pic = UIImage(contentsOfFile: PlayHistory.slotURL(game.historyKey, slot).path)
         return Button { actions.load(slot) } label: {
             VStack(alignment: .leading, spacing: 0) {
                 Group {

@@ -1,0 +1,23 @@
+[
+  {"file": "2048.3dsx", "title": "2048", "author": "Carlos \"0rientd\" Henrique", "license": "MIT",
+   "licenseFile": "2048.txt", "source": "https://github.com/0rientd/2048-port-3ds",
+   "about": "经典的数字合并益智游戏。版本 v1.1.1。", "notes": null},
+  {"file": "Anarch.3dsx", "title": "Anarch", "author": "Miloslav Číž（原作）、blitzdoughnuts（3DS 移植）", "license": "CC0-1.0",
+   "licenseFile": "Anarch.txt", "source": "https://github.com/blitzdoughnuts/AnarchDEVKIT",
+   "about": "复古风格的第一人称射击游戏，画面完全由 CPU 软件渲染。3DS 移植版 1.0。操作：方向键或摇杆移动，A 开火，B 按住平移，SELECT 地图，START 菜单。",
+   "notes": "游戏的代码和美术都以 CC0 放弃版权发布。移植作者的说明（README）里写明源代码另见 https://codeberg.org/blitzdoughnuts/Anarch_DEVKIT 。"},
+  {"file": "Craftus.3dsx", "title": "Craftus Reloaded", "author": "Kemal Afzal \"RSDuck\"", "license": "MIT（纹理另有许可）",
+   "licenseFile": "Craftus.txt", "source": "https://github.com/RSDuck/craftus_reloaded",
+   "about": "方块建造游戏，使用 3DS 的 PICA200 GPU 绘制 3D 画面，可以保存多个世界。版本 0.3。",
+   "notes": "游戏里的纹理不属于 MIT 许可：作者 XSSheep，以 CC BY-SA 许可发布。依赖库各自适用其许可证（见源代码的 dependencies 文件夹）。"},
+  {"file": "HexIsoPath.3dsx", "title": "HexIsoPath", "author": "LiquidFenrir", "license": "MIT",
+   "licenseFile": "HexIsoPath.txt", "source": "https://github.com/LiquidFenrir/HexIsoPath",
+   "about": "六边形棋盘上的双人对战棋类游戏，支持本地无线联机。版本 v1.1.0。", "notes": null},
+  {"file": "StarCruiser7.3dsx", "title": "StarCruiser7", "author": "dotMizi", "license": "MIT",
+   "licenseFile": "StarCruiser7.txt", "source": "https://github.com/dotMizi/StarCruiser7",
+   "about": "太空战斗游戏，开局可选四个难度，用到双屏、触屏和立体 3D。版本 v1.1.0。", "notes": null},
+  {"file": "Yahtzee3DS.3dsx", "title": "Yahtzee3DS", "author": "LiquidFenrir", "license": "GPL-3.0",
+   "licenseFile": "Yahtzee3DS.txt", "source": "https://github.com/LiquidFenrir/Yahtzee3DS",
+   "about": "快艇骰子游戏，支持单人和本地无线多人。版本 v1.0.1。",
+   "notes": "以 GNU GPL 第 3 版发布：你可以在上面的源代码地址取得与这个版本对应的完整源代码，并按 GPL 的条款复制、修改和再发布。"}
+]

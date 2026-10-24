@@ -46,10 +46,16 @@ enum AutoTest {
         log("autoboot requested: \(file); jit=\(JITHelper.statusText)")
         Task { @MainActor in
             for _ in 0..<60 {
-                if let g = library.games.first(where: { $0.url.lastPathComponent == file || $0.titleIDString == file.uppercased() }) {
+                // "bundled:<file>" picks the copy inside the app over one in Documents/Games.
+                let wantBundled = file.hasPrefix("bundled:")
+                let name = wantBundled ? String(file.dropFirst("bundled:".count)) : file
+                if let g = library.games.first(where: {
+                    $0.isBundled == wantBundled && ($0.url.lastPathComponent == name || $0.titleIDString == name.uppercased())
+                }) {
                     for x in library.games {
-                        log("library: \(x.title) [\(x.titleIDString)] installed=\(x.isInstalledTitle) update=\(x.updateVersion.map { Game.versionString($0) } ?? "-") dlc=\(x.hasDLC)")
+                        log("library: \(x.title) [\(x.titleIDString)] installed=\(x.isInstalledTitle) bundled=\(x.isBundled) update=\(x.updateVersion.map { Game.versionString($0) } ?? "-") dlc=\(x.hasDLC)")
                     }
+                    log("boot path: \(g.url.path)")
                     if let m = library.notice { log("import notice: \(m.replacingOccurrences(of: "\n", with: " | "))") }
                     log("booting \(g.title)")
                     play(g)
@@ -340,7 +346,7 @@ enum RemotePlay {
                     ui += " ui=" + chain.joined(separator: ">")
                 }
                 let clock = az_debug_console_clock_offset_ms()
-                log(AutoTest.hitchSummary(&AutoTest.statusHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + (clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
+                log(AutoTest.hitchSummary(&AutoTest.statusHitchCursor) + " thermal=\(ProcessInfo.processInfo.thermalState.rawValue) " + (clock == Int64.min ? "" : "clock=\(clock / 1000)s ") + (KeyboardBridge.isOpen ? "kbd=open " : "") + String(format: "status running=%d paused=%d speed=%.0f%% fps=%.1f jit=%d ", az_is_running() ? 1 : 0,
                            az_is_paused() ? 1 : 0, st.emulation_speed * 100, st.game_fps, Int(az_jit_status().rawValue)) + ui)
             case "pgo":
                 // pgo: write the PGO counters of an instrumented build to remote/interp.profraw.
@@ -363,6 +369,10 @@ enum RemotePlay {
                 let secs = n(1, 10), hz = n(2, 1000)
                 let count = az_debug_profile(dir.appendingPathComponent("prof.txt").path, Int32(secs), Int32(hz))
                 log("prof samples=\(count)")
+            case "kbd":
+                // kbd [text]: answer the game's software keyboard (the emulation waits for it).
+                let text = p.dropFirst().joined(separator: " ")
+                log("kbd answered=\(KeyboardBridge.answer(text) ? 1 : 0)")
             case "mem": log("mem \(memDetail())")
             case "heap":
                 // Big live malloc blocks by size: what is left behind after save/load.
