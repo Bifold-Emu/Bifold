@@ -152,6 +152,36 @@ __attribute__((noinline)) static u32 wb(u32 a, u32 b, u32* m, u32 h) {
     return h - (u32)m;
 }
 
+
+// One-register POP {pc} is LDR PC, [SP], #4; also a conditional one.
+u32 ldrpop(u32 x);
+asm(".text\n.arm\n.global ldrpop\nldrpop:\n"
+    "str lr, [sp, #-4]!\n"
+    "bl 1f\n"
+    "add r0, r0, #5\n"
+    "cmp r0, #0x1000\n"
+    "ldrhi pc, [sp], #4\n"
+    "add r0, r0, r0, lsl #1\n"
+    "ldr pc, [sp], #4\n"
+    "1: str lr, [sp, #-4]!\n"
+    "eor r0, r0, r0, lsr #7\n"
+    "ldr pc, [sp], #4\n");
+
+
+// CMP immediately followed by a conditional branch (fused in the interpreter): every kind of
+// CMP operand, taken and not taken, and a conditional BL.
+u32 cmpbr(u32 a, u32 b);
+asm(".text\n.arm\n.global cmpbr\ncmpbr:\n"
+    "push {r4, lr}\n mov r2, #0\n"
+    "cmp r0, #0x100\n bhi 1f\n add r2, r2, #1\n1:\n"
+    "cmp r0, r1\n blt 2f\n add r2, r2, #2\n2:\n"
+    "cmp r1, r0, lsr #3\n bne 3f\n add r2, r2, #4\n3:\n"
+    "cmp r0, r1, asr #2\n blcc 9f\n"
+    "cmp r1, #0x80000000\n bvs 4f\n add r2, r2, #16\n4:\n"
+    "cmp r0, r0\n beq 5f\n add r2, r2, #32\n5:\n"
+    "add r0, r2, r0, lsl #6\n pop {r4, pc}\n"
+    "9: add r2, r2, #8\n bx lr\n");
+
 static void band(u8* fb, u32 rows, u32 hash) {
     for (u32 y = 0; y < rows; ++y) {
         const u32 bit = (hash >> ((y * 32) / rows)) & 1;
@@ -184,6 +214,8 @@ __attribute__((noreturn, section(".text.start"))) void _start(void) {
             h += rec(18 + (i & 1), a) ^ rec_ptr(i & 7, b) ^ thumb_mid(c, rec_ptr);
         h = pagecross(h ^ a);
         h = wb(a, b, &mem[16 + (i & 15)], h);
+        h ^= ldrpop(h & 0x1fff);
+        h = (h << 3) ^ cmpbr(a ^ (i & 0x1ff), b) ^ (cmpbr(i & 0x3ff, (i * 7) & 0x3ff) * 0x9E3779B1u);
     }
     for (;;) {
         band((u8*)0x1F1E6000, 400, h);

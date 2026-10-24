@@ -465,7 +465,7 @@ index 47d2606..9625528 100644
  
  } // namespace Core
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
-index 781ff3d..9e2f7bf 100644
+index 781ff3d..89eaf23 100644
 --- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
 @@ -9,6 +9,11 @@
@@ -1016,7 +1016,7 @@ index 781ff3d..9e2f7bf 100644
 -        goto DISPATCH;
 +        link = &inst_cream->link[0];
 +    } else {
-+        cpu->Reg[15] += cpu->GetInstructionSize();
++        cpu->Reg[15] += 4; // BBL is ARM only (Thumb branches have their own handlers)
      }
 -    cpu->Reg[15] += cpu->GetInstructionSize();
      INC_PC(sizeof(bbl_inst));
@@ -1120,7 +1120,24 @@ index 781ff3d..9e2f7bf 100644
  
      unsigned int value = cpu->ReadMemory32(addr);
      cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2146,7 +2407,7 @@ LDR_INST: {
+@@ -2135,6 +2396,16 @@ LDR_INST: {
+         cpu->TFlag = value & 0x1;
+         cpu->Reg[15] &= 0xFFFFFFFE;
+         INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++        if (BITS(inst_cream->inst, 16, 19) == 13) { // LDR PC, [SP], #4: a one-register POP
++            const std::size_t block = PredictReturn(cpu);
++            if (block != NO_BLOCK) {
++                ptr = block;
++                inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                GOTO_NEXT_INST;
++            }
++        }
++#endif
+         goto DISPATCH;
+     }
+ 
+@@ -2146,7 +2417,7 @@ LDR_INST: {
  LDRCOND_INST: {
      if (CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1129,7 +1146,24 @@ index 781ff3d..9e2f7bf 100644
  
          unsigned int value = cpu->ReadMemory32(addr);
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
-@@ -2189,7 +2450,7 @@ UXTAH_INST: {
+@@ -2156,6 +2427,16 @@ LDRCOND_INST: {
+             cpu->TFlag = value & 0x1;
+             cpu->Reg[15] &= 0xFFFFFFFE;
+             INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (BITS(inst_cream->inst, 16, 19) == 13) { // LDR PC, [SP], #4: a one-register POP
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
+             goto DISPATCH;
+         }
+     }
+@@ -2189,7 +2470,7 @@ UXTAH_INST: {
  LDRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1138,7 +1172,7 @@ index 781ff3d..9e2f7bf 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
      }
-@@ -2201,7 +2462,7 @@ LDRB_INST: {
+@@ -2201,7 +2482,7 @@ LDRB_INST: {
  LDRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1147,7 +1181,7 @@ index 781ff3d..9e2f7bf 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -2222,7 +2483,7 @@ LDRD_INST: {
+@@ -2222,7 +2503,7 @@ LDRD_INST: {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
          // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
          // addr[2] == 0)
@@ -1156,7 +1190,7 @@ index 781ff3d..9e2f7bf 100644
  
          // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
          // wouldn't do this as a single read.
-@@ -2297,7 +2558,7 @@ LDREXD_INST: {
+@@ -2297,7 +2578,7 @@ LDREXD_INST: {
  LDRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1165,7 +1199,7 @@ index 781ff3d..9e2f7bf 100644
  
          cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
      }
-@@ -2309,7 +2570,7 @@ LDRH_INST: {
+@@ -2309,7 +2590,7 @@ LDRH_INST: {
  LDRSB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1174,7 +1208,7 @@ index 781ff3d..9e2f7bf 100644
          unsigned int value = cpu->ReadMemory8(addr);
          if (BIT(value, 7)) {
              value |= 0xffffff00;
-@@ -2324,7 +2585,7 @@ LDRSB_INST: {
+@@ -2324,7 +2605,7 @@ LDRSB_INST: {
  LDRSH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1183,7 +1217,7 @@ index 781ff3d..9e2f7bf 100644
  
          unsigned int value = cpu->ReadMemory16(addr);
          if (BIT(value, 15)) {
-@@ -2340,7 +2601,7 @@ LDRSH_INST: {
+@@ -2340,7 +2621,7 @@ LDRSH_INST: {
  LDRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1192,7 +1226,7 @@ index 781ff3d..9e2f7bf 100644
  
          const u32 dest_index = BITS(inst_cream->inst, 12, 15);
          const u32 previous_mode = cpu->Mode;
-@@ -3565,7 +3826,7 @@ STM_INST: {
+@@ -3565,7 +3846,7 @@ STM_INST: {
          unsigned int Rn = BITS(inst, 16, 19);
          unsigned int old_RN = cpu->Reg[Rn];
  
@@ -1201,7 +1235,7 @@ index 781ff3d..9e2f7bf 100644
          if (BIT(inst_cream->inst, 22) == 1) {
              for (int i = 0; i < 13; i++) {
                  if (BIT(inst_cream->inst, i)) {
-@@ -3593,15 +3854,14 @@ STM_INST: {
+@@ -3593,15 +3874,14 @@ STM_INST: {
                  cpu->WriteMemory32(addr, cpu->Reg[15] + 8);
              }
          } else {
@@ -1224,7 +1258,7 @@ index 781ff3d..9e2f7bf 100644
              }
  
              // Check PC reg
-@@ -3635,7 +3895,7 @@ SXTB_INST: {
+@@ -3635,7 +3915,7 @@ SXTB_INST: {
  STR_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1233,7 +1267,7 @@ index 781ff3d..9e2f7bf 100644
  
          unsigned int reg = BITS(inst_cream->inst, 12, 15);
          unsigned int value = cpu->Reg[reg];
-@@ -3675,7 +3935,7 @@ UXTAB_INST: {
+@@ -3675,7 +3955,7 @@ UXTAB_INST: {
  STRB_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1242,7 +1276,7 @@ index 781ff3d..9e2f7bf 100644
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
          cpu->WriteMemory8(addr, value);
      }
-@@ -3687,7 +3947,7 @@ STRB_INST: {
+@@ -3687,7 +3967,7 @@ STRB_INST: {
  STRBT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1251,7 +1285,7 @@ index 781ff3d..9e2f7bf 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
-@@ -3704,7 +3964,7 @@ STRBT_INST: {
+@@ -3704,7 +3984,7 @@ STRBT_INST: {
  STRD_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1260,7 +1294,7 @@ index 781ff3d..9e2f7bf 100644
  
          // The 3DS doesn't have the Large Physical Access Extension (LPAE)
          // so STRD wouldn't store these as a single write.
-@@ -3805,7 +4065,7 @@ STREXH_INST: {
+@@ -3805,7 +4085,7 @@ STREXH_INST: {
  STRH_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1269,7 +1303,7 @@ index 781ff3d..9e2f7bf 100644
  
          unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
          cpu->WriteMemory16(addr, value);
-@@ -3818,7 +4078,7 @@ STRH_INST: {
+@@ -3818,7 +4098,7 @@ STRH_INST: {
  STRT_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
@@ -1278,7 +1312,7 @@ index 781ff3d..9e2f7bf 100644
  
          const u32 previous_mode = cpu->Mode;
          const u32 rt_index = BITS(inst_cream->inst, 12, 15);
-@@ -3871,11 +4131,17 @@ SUB_INST: {
+@@ -3871,11 +4151,17 @@ SUB_INST: {
  SWI_INST: {
      if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
          swi_inst* const inst_cream = (swi_inst*)inst_base->component;
@@ -1301,7 +1335,7 @@ index 781ff3d..9e2f7bf 100644
          // The kernel would call ERET to get here, which clears exclusive memory state.
          cpu->UnsetExclusiveMemoryAddress();
      }
-@@ -4580,17 +4846,1091 @@ YIELD_INST: {
+@@ -4580,17 +4866,1091 @@ YIELD_INST: {
      GOTO_NEXT_INST;
  }
  
@@ -1446,7 +1480,7 @@ index 781ff3d..9e2f7bf 100644
 +    INC_PC(sizeof(ldst_inst));
 +    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
-+}
+ }
 +LDR_LIT_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        const ldst_imm_inst* const inst_cream = (const ldst_imm_inst*)inst_base->component;
@@ -1525,7 +1559,7 @@ index 781ff3d..9e2f7bf 100644
 +    INC_PC(sizeof(sub_inst));
 +    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
-+}
+ }
 +CMP_SH_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        cmp_inst* const inst_cream = (cmp_inst*)inst_base->component;
@@ -1541,7 +1575,7 @@ index 781ff3d..9e2f7bf 100644
 +    INC_PC(sizeof(cmp_inst));
 +    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
- }
++}
 +MOV_SH_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        mov_inst* const inst_cream = (mov_inst*)inst_base->component;
@@ -1551,7 +1585,7 @@ index 781ff3d..9e2f7bf 100644
 +    INC_PC(sizeof(mov_inst));
 +    inst_base = (arm_inst*)&trans_cache_buf[ptr]; // never a block's last instruction
 +    GOTO_NEXT_INST;
- }
++}
 +ORR_SH_INST: {
 +    if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
 +        orr_inst* const inst_cream = (orr_inst*)inst_base->component;
@@ -2405,10 +2439,10 @@ index 781ff3d..9e2f7bf 100644
 +#endif
 diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
 new file mode 100644
-index 0000000..f8e6054
+index 0000000..590b8a0
 --- /dev/null
 +++ b/src/core/arm/dyncom/arm_dyncom_interpreter_tc.inc
-@@ -0,0 +1,5563 @@
+@@ -0,0 +1,5583 @@
 +// Generated by scripts/tools/gen_dyncom_tailcall.py from arm_dyncom_interpreter.cpp and
 +// vfpinstr.cpp. Do not edit; re-run the script after changing either file.
 +// Included at the end of arm_dyncom_interpreter.cpp (needs the macros defined there).
@@ -3103,7 +3137,7 @@ index 0000000..f8e6054
 +        SET_PC;
 +        link = &inst_cream->link[0];
 +    } else {
-+        cpu->Reg[15] += cpu->GetInstructionSize();
++        cpu->Reg[15] += 4; // BBL is ARM only (Thumb branches have their own handlers)
 +    }
 +    INC_PC(sizeof(bbl_inst));
 +#ifndef ENABLE_GDBSTUB // a linked block skips the breakpoint lookup at dispatch
@@ -3524,6 +3558,16 @@ index 0000000..f8e6054
 +        cpu->TFlag = value & 0x1;
 +        cpu->Reg[15] &= 0xFFFFFFFE;
 +        INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++        if (BITS(inst_cream->inst, 16, 19) == 13) { // LDR PC, [SP], #4: a one-register POP
++            const std::size_t block = PredictReturn(cpu);
++            if (block != NO_BLOCK) {
++                ptr = block;
++                inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                GOTO_NEXT_INST;
++            }
++        }
++#endif
 +        TC_GOTO_DISPATCH;
 +    }
 +
@@ -3547,6 +3591,16 @@ index 0000000..f8e6054
 +            cpu->TFlag = value & 0x1;
 +            cpu->Reg[15] &= 0xFFFFFFFE;
 +            INC_PC(sizeof(ldst_inst));
++#ifndef ENABLE_GDBSTUB
++            if (BITS(inst_cream->inst, 16, 19) == 13) { // LDR PC, [SP], #4: a one-register POP
++                const std::size_t block = PredictReturn(cpu);
++                if (block != NO_BLOCK) {
++                    ptr = block;
++                    inst_base = (arm_inst*)&trans_cache_buf[ptr];
++                    GOTO_NEXT_INST;
++                }
++            }
++#endif
 +            TC_GOTO_DISPATCH;
 +        }
 +    }
