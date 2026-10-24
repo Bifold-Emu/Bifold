@@ -250,14 +250,19 @@ final class VirtualControllerView: UIView {
             // Left column: circle pad above the d-pad. Right: ABXY. Centre column (between them):
             // HOME, START, SELECT stacked, so nothing overlaps on narrow phones.
             let controlsTop = top + shoulderH + margin
-            let stick = min(pad * 0.9, (b.maxY - controlsTop - margin) * 0.52)
-            let dpadSize = stick * 0.85
-            place(.circlePad, CGRect(x: leftX, y: controlsTop, width: stick, height: stick))
-            place(.dpad, CGRect(x: leftX + (stick - dpadSize) / 2, y: min(controlsTop + stick + margin * 0.3, b.maxY - dpadSize - margin),
+            // The circle pad is smaller than the d-pad (it used to be pad * 0.9, big enough that
+            // thumbs strayed onto the buttons around it); the d-pad keeps its old size. Both are
+            // centred in the left column.
+            let avail = b.maxY - controlsTop - margin
+            let stick = min(pad * 0.72, avail * 0.42)
+            let dpadSize = min(pad * 0.765, avail * 0.442)
+            let column = max(stick, dpadSize)
+            place(.circlePad, CGRect(x: leftX + (column - stick) / 2, y: controlsTop, width: stick, height: stick))
+            place(.dpad, CGRect(x: leftX + (column - dpadSize) / 2, y: min(controlsTop + stick + margin * 0.6, b.maxY - dpadSize - margin),
                                 width: dpadSize, height: dpadSize))
             faceButtons(cx: rightX - face * 1.55, cy: max(controlsTop + face * 1.6, areaMidY - face * 0.3))
             let smallW = unit * 1.1, smallH = unit * 0.5
-            let centerX = (leftX + stick + (rightX - face * 3.1)) / 2
+            let centerX = (leftX + column + (rightX - face * 3.1)) / 2
             let bottomY = b.maxY - smallH - margin
             place(.button(AZ_BUTTON_SELECT), CGRect(x: centerX - smallW / 2, y: bottomY, width: smallW, height: smallH))
             place(.button(AZ_BUTTON_START), CGRect(x: centerX - smallW / 2, y: bottomY - smallH - margin * 0.6, width: smallW, height: smallH))
